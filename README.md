@@ -14,8 +14,7 @@ user; and a chat interface for people to actually use it - packaged as a FastAPI
 frontend, exposed publicly via a free tunnel.
 
 ## Demo
-
-20260816-0911-03.4433891 (1).mp4
+<video src="https://raw.githubusercontent.com/manishanaiyar/India-DPDP-Act---GraphRAG-Assistant-with-Human-in-the-Loop-Review/main/demo.mp4" controls width="700"></video>
 
 ## Run it
 
