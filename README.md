@@ -15,13 +15,7 @@ frontend, exposed publicly via a free tunnel.
 
 ## Demo
 
-<!--
-Paste the link/embed GitHub gives you after dragging your screen recording into the
-README editor (pencil icon on this file, in the browser) or a new Issue - it looks like:
-https://github.com/user-attachments/assets/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-Paste that whole line here (on its own line) and GitHub will render it as an inline
-playable video automatically. Remove this comment block once the link is in place.
--->
+20260816-0911-03.4433891 (1).mp4
 
 ## Run it
 
