@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+pypdf
+requests
+neo4j
