@@ -38,6 +38,7 @@ def stream_chat(messages: list[dict]) -> Iterator[str]:
         "messages": messages,
         "max_tokens": cfg.GROQ_MAX_TOKENS,
         "stream": True,
+        "reasoning_effort": "low"
     }
     headers = {
         "Authorization": f"Bearer {cfg.GROQ_API_KEY}",
