@@ -2,7 +2,7 @@
 // DEPLOYMENT.md). Frontend (Vercel) and backend (Render) are different
 // domains now, so this can no longer be a same-origin empty string.
 // Example: "https://dpdp-act-backend.onrender.com"
-const API = "REPLACE_WITH_YOUR_RENDER_URL";
+const API = "   const API_BASE = "https://india-dpdp-act-graphrag-assistant-with.onrender.com";";
 
 const el = {
   statusDot: document.getElementById("statusDot"),
