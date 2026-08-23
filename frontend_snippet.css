@@ -1,0 +1,111 @@
+/*
+  frontend_snippet.css
+  ---------------------
+  Paste at the end of your existing style.css. All selectors are scoped
+  under the "bri-" prefix (Banking Regulatory Intelligence) so nothing
+  here overrides your existing DPDP chat styles. Colors use CSS custom
+  properties with sensible fallbacks - replace the fallback hex values
+  with your existing theme variables if style.css already defines them.
+*/
+
+.bri-law-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+  border-radius: 8px;
+  background: var(--bri-bar-bg, #f1f3f5);
+}
+
+.bri-label {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--bri-label-color, #495057);
+}
+
+#bri-law-selector {
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid var(--bri-border, #ced4da);
+  font-size: 0.85rem;
+  background: white;
+}
+
+.bri-classify-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  margin-top: 0.75rem;
+  border: 1px dashed var(--bri-border, #ced4da);
+  border-radius: 8px;
+}
+
+.bri-classify-tool textarea {
+  min-height: 60px;
+  padding: 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--bri-border, #ced4da);
+  font-family: inherit;
+  font-size: 0.85rem;
+  resize: vertical;
+}
+
+.bri-classify-tool button {
+  align-self: flex-start;
+  padding: 0.45rem 1rem;
+  border: none;
+  border-radius: 6px;
+  background: var(--bri-accent, #1971c2);
+  color: white;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.bri-classify-tool button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.bri-policy-panel {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  background: var(--bri-panel-bg, #e7f5ff);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.bri-policy-panel h4 {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.9rem;
+}
+
+.bri-tag {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  margin: 0.1rem;
+  border-radius: 999px;
+  background: var(--bri-tag-bg, #d0ebff);
+  color: var(--bri-tag-color, #1864ab);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.bri-control {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  margin: 0.1rem;
+  border-radius: 999px;
+  background: var(--bri-control-bg, #ffe3e3);
+  color: var(--bri-control-color, #c92a2a);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.bri-policy-panel ul {
+  margin: 0.4rem 0 0 0;
+  padding-left: 1.1rem;
+}

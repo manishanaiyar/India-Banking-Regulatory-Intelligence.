@@ -1,0 +1,40 @@
+<!--
+  frontend_snippet.html
+  ----------------------
+  Paste this INSIDE your existing chat container in index.html, above
+  (or beside) your current message input area. It does not replace
+  anything - it's additive markup that frontend_snippet.js binds to.
+
+  IDs used here (law-selector, policy-panel, etc.) are namespaced with a
+  "bri-" prefix (Banking Regulatory Intelligence) to avoid colliding with
+  any existing ids in your current index.html.
+-->
+
+<div class="bri-law-bar">
+  <label for="bri-law-selector" class="bri-label">Regulation:</label>
+  <select id="bri-law-selector">
+    <option value="all">All laws</option>
+    <option value="dpdp">DPDP Act, 2023 (Privacy)</option>
+    <option value="kyc_aml">RBI KYC / AML (RBI-KYC)</option>
+    <option value="pmla">PMLA, 2002 (RBI-KYC)</option>
+    <option value="rbi_cyber">RBI Cyber Security / CERT-In (Cybersecurity)</option>
+  </select>
+</div>
+
+<!--
+  Optional: a small "classify this text" tool, separate from the main
+  chat - useful for compliance staff pasting a data field description and
+  wanting an instant masking/encryption/tokenisation recommendation
+  without going through the full Q&A chat flow.
+-->
+<div class="bri-policy-panel" id="bri-policy-panel" hidden>
+  <h4>Data Classification &amp; Policy Result</h4>
+  <div id="bri-policy-classes"></div>
+  <div id="bri-policy-controls"></div>
+  <div id="bri-policy-rationale"></div>
+</div>
+
+<div class="bri-classify-tool">
+  <textarea id="bri-classify-input" placeholder="Paste a data field or clause to classify (e.g. 'Customer PAN and account balance')..."></textarea>
+  <button id="bri-classify-btn" type="button">Classify &amp; Get Policy</button>
+</div>
