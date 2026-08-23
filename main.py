@@ -30,15 +30,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-import dpdp_config as cfg
-from dpdp_ingest import build_tagged_sections, fetch_act_pdf
-from dpdp_stores import AnswerCache, KnowledgeStore, RateLimiter, ReviewQueue
-from groq_client import GroqError, stream_chat
+from src import dpdp_config as cfg
+from src.dpdp_ingest import build_tagged_sections, fetch_act_pdf
+from src.dpdp_stores import AnswerCache, KnowledgeStore, RateLimiter, ReviewQueue
+from src.groq_client import GroqError, stream_chat
 
-import banking_config
-import policy_engine
-import audit_log
-from ingest_common import IngestError
+from src import banking_config
+from src import policy_engine
+from src import audit_log
+from src.ingest_common import IngestError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("dpdp.main")
@@ -163,11 +163,11 @@ def run_ingestion_for_law(law: str) -> dict:
     # before `pypdf` is added to requirements.txt - only /ingest/{law}
     # calls need it, not app startup.
     if law == "kyc_aml":
-        from kyc_pmla_ingest import ingest_kyc as _ingest_fn
+        from src.kyc_pmla_ingest import ingest_kyc as _ingest_fn
     elif law == "pmla":
-        from kyc_pmla_ingest import ingest_pmla as _ingest_fn
+        from src.kyc_pmla_ingest import ingest_pmla as _ingest_fn
     elif law == "rbi_cyber":
-        from cyber_ingest import ingest_cyber as _ingest_fn
+        from src.cyber_ingest import ingest_cyber as _ingest_fn
 
     try:
         sections = _ingest_fn()
