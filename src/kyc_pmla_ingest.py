@@ -1,55 +1,28 @@
 """
 kyc_pmla_ingest.py
 -------------------
-RBI/KYC pillar: RBI Master Direction on KYC (incl. CDD, Beneficial Owner)
-and PMLA, 2002 + Rules. Uses ingest_common.build_tagged_sections_for_law()
-so output is shaped exactly like your existing DPDP sections.
+RBI/KYC pillar: RBI Master Direction on KYC and PMLA, 2002.
 
-VERIFY THESE PATTERNS before production ingest - see ingest_common.py's
-module docstring. Open the actual current PDFs and check how they number
-clauses; adjust the regex if it doesn't match.
+Now delegates to llm_ingest.py (LLM-based extraction for KYC, header-split
+for PMLA), replacing the earlier regex-based approach - the RBI KYC PDF's
+layout is irregular enough that a fixed regex needed constant babysitting,
+and your tested notebook's LLM extraction handled it more reliably.
+
+Kept as a separate module (rather than deleting it and pointing main.py at
+llm_ingest.py directly) so ingest_kyc() / ingest_pmla() stay at the same
+import path main.py already uses:
+    from src.kyc_pmla_ingest import ingest_kyc as _ingest_fn
+    from src.kyc_pmla_ingest import ingest_pmla as _ingest_fn
+No changes needed in main.py for this swap.
+
+The old regex-based CATEGORY_KEYWORDS/build_tagged_sections_for_law
+approach still lives in ingest_common.py if you ever want to fall back to
+it (e.g. if Groq's free tier becomes unavailable) - nothing here deletes
+it, this file just no longer calls it.
 """
 
 from __future__ import annotations
 
-import logging
+from .llm_ingest import IngestError, ingest_kyc, ingest_pmla
 
-from src.banking_config import LAWS
-from src.ingest_common import IngestError, build_tagged_sections_for_law
-
-logger = logging.getLogger("kyc_pmla_ingest")
-
-KYC_SECTION_PATTERN = r"^(\d{1,2}\.\d{1,3})\s+"           # e.g. "4.3 "
-PMLA_SECTION_PATTERN = r"^Section\s+(\d{1,3}[A-Z]?)\.\s+"  # e.g. "Section 12A. "
-
-
-def ingest_kyc() -> list[dict]:
-    cfg = LAWS["kyc_aml"]
-    return build_tagged_sections_for_law(
-        law_code="kyc_aml",
-        pdf_url=cfg["pdf_url"],
-        section_pattern=KYC_SECTION_PATTERN,
-        sensitive_categories=cfg["sensitive_categories"],
-        chapter_label=cfg["label"],
-    )
-
-
-def ingest_pmla() -> list[dict]:
-    cfg = LAWS["pmla"]
-    return build_tagged_sections_for_law(
-        law_code="pmla",
-        pdf_url=cfg["pdf_url"],
-        section_pattern=PMLA_SECTION_PATTERN,
-        sensitive_categories=cfg["sensitive_categories"],
-        chapter_label=cfg["label"],
-    )
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    for name, fn in (("KYC", ingest_kyc), ("PMLA", ingest_pmla)):
-        try:
-            sections = fn()
-            print(f"{name}: parsed {len(sections)} sections")
-        except IngestError as exc:
-            print(f"{name} ingest failed: {exc}")
+__all__ = ["IngestError", "ingest_kyc", "ingest_pmla"]
