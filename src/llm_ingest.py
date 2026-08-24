@@ -55,6 +55,7 @@ calling this live from POST /ingest/{law_code}.
 
 from __future__ import annotations
 
+import difflib
 import io
 import json
 import logging
@@ -267,6 +268,46 @@ def _call_groq_json(chapter_label: str, chunk: str, retries: int = 3) -> dict:
     raise IngestError(f"Groq API still rate-limited after {retries} attempts.")
 
 
+def _normalize_for_comparison(text: str) -> str:
+    """Collapses all whitespace runs (including PDF-extraction line breaks
+    that don't correspond to real paragraph breaks) so verbatim comparison
+    isn't thrown off by re-wrapping - only real content differences should
+    lower the score, not line-wrap position."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def verbatim_overlap_ratio(extracted_text: str, source_text: str) -> float:
+    """Longest-common-run overlap between extracted_text and source_text,
+    as a fraction of extracted_text's length. 1.0 means extracted_text (or
+    a whitespace-reflowed version of it) is a genuine contiguous substring
+    of the source. Lower values mean the LLM likely paraphrased, merged
+    content from elsewhere, or otherwise didn't copy verbatim as the
+    extraction prompt instructs it to.
+
+    This exists because CONFIDENCE_THRESHOLD (the LLM's own self-reported
+    confidence) does NOT catch this failure mode - real production output
+    showed a section tagged confidence=0.94 (comfortably above the 0.85
+    threshold) that was only 65% verbatim-verifiable, because the LLM had
+    merged/paraphrased text from an adjacent clause. The LLM can be
+    confident about the wrong thing. This check is independent of the
+    LLM's self-assessment."""
+    extracted_norm = _normalize_for_comparison(extracted_text)
+    source_norm = _normalize_for_comparison(source_text)
+    if not extracted_norm:
+        return 0.0
+    if extracted_norm in source_norm:
+        return 1.0
+    matcher = difflib.SequenceMatcher(None, extracted_norm, source_norm, autojunk=False)
+    match = matcher.find_longest_match(0, len(extracted_norm), 0, len(source_norm))
+    return match.size / len(extracted_norm)
+
+
+# Below this ratio, a section is forced into human review regardless of
+# the LLM's own confidence score - see verbatim_overlap_ratio()'s
+# docstring for why confidence alone isn't sufficient.
+VERBATIM_OVERLAP_THRESHOLD = 0.90
+
+
 def _build_entities(project_category: str | None, title: str) -> dict:
     entities = {"obligations": [], "rights": [], "penalties": [], "definitions": []}
     if project_category in entities:
@@ -278,17 +319,24 @@ def llm_extract_sections(law_code: str, full_text: str, chapter_label: str, sour
     """Chunk the document, call the LLM per chunk, and return sections in
     the project's standard shape (same as ingest_common.py's output -
     verified compatible with dpdp_stores.KnowledgeStore.commit_section()
-    and main.py's needs_review check)."""
+    and main.py's needs_review check).
+
+    Each extracted item's raw_text is verified against the CHUNK it came
+    from (not the whole document - faster, and the chunk is exactly what
+    the LLM actually saw) via verbatim_overlap_ratio(). Items scoring
+    below VERBATIM_OVERLAP_THRESHOLD are forced sensitive=True regardless
+    of the LLM's reported confidence - see that function's docstring for
+    the real production case that motivated this."""
     chunks = chunk_text(full_text, target_chars=9000)
     logger.info("law=%s split into %d chunk(s)", law_code, len(chunks))
 
-    all_items = []
+    all_items = []  # list of (item_dict, source_chunk_text)
     for i, chunk in enumerate(chunks):
         logger.info("law=%s chunk %d/%d (%d chars)", law_code, i + 1, len(chunks), len(chunk))
         parsed = _call_groq_json(chapter_label, chunk)
         items = parsed.get("sections", [])
         logger.info("law=%s chunk %d/%d -> %d sections", law_code, i + 1, len(chunks), len(items))
-        all_items.extend(items)
+        all_items.extend((item, chunk) for item in items)
         if i < len(chunks) - 1:
             time.sleep(SLEEP_BETWEEN_CALLS_SECONDS)
 
@@ -297,18 +345,36 @@ def llm_extract_sections(law_code: str, full_text: str, chapter_label: str, sour
 
     fetched_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     sections = []
-    for item in all_items:
+    verbatim_failures = 0
+    for item, source_chunk in all_items:
         llm_category = item.get("category", "Definition")
         project_category = _CATEGORY_TO_PROJECT_VOCAB.get(llm_category, "definitions")
         confidence = float(item.get("confidence", 0.0))
-        sensitive = project_category in SENSITIVE_CATEGORIES or confidence < CONFIDENCE_THRESHOLD
+        raw_text = item.get("full_text", "")
+
+        overlap = verbatim_overlap_ratio(raw_text, source_chunk)
+        verbatim_ok = overlap >= VERBATIM_OVERLAP_THRESHOLD
+        if not verbatim_ok:
+            verbatim_failures += 1
+            logger.warning(
+                "law=%s section_number=%s FAILED verbatim check (%.0f%% overlap, need >=%.0f%%) "
+                "- forcing human review regardless of LLM confidence=%.2f",
+                law_code, item.get("section_number", "?"), overlap * 100,
+                VERBATIM_OVERLAP_THRESHOLD * 100, confidence,
+            )
+
+        sensitive = (
+            project_category in SENSITIVE_CATEGORIES
+            or confidence < CONFIDENCE_THRESHOLD
+            or not verbatim_ok
+        )
         title = item.get("title", "")[:200]
         section_number = item.get("section_number", "?")
         sections.append({
             "id": f"{law_code}:{section_number}",
             "title": title,
             "chapter": chapter_label,
-            "raw_text": item.get("full_text", ""),
+            "raw_text": raw_text,
             "source_url": source_url,
             "entities": _build_entities(project_category, title),
             "sensitive": sensitive,
@@ -317,8 +383,13 @@ def llm_extract_sections(law_code: str, full_text: str, chapter_label: str, sour
             "category": project_category,
             "rationale": item.get("rationale", ""),
             "fetched_at": fetched_at,
+            "verbatim_overlap": round(overlap, 3),
+            "verbatim_verified": verbatim_ok,
         })
-    logger.info("LLM extracted %d total sections for law=%s", len(sections), law_code)
+    logger.info(
+        "LLM extracted %d total sections for law=%s (%d failed verbatim check -> forced to review)",
+        len(sections), law_code, verbatim_failures,
+    )
     return sections
 
 
