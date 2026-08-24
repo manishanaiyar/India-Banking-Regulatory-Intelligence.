@@ -66,7 +66,10 @@ LAWS = {
         "pillar": "RBI / KYC",
         # VERIFY current URL at rbi.org.in before ingesting - RBI reissues
         # master directions with new document IDs periodically.
-        "pdf_url": "https://www.rbi.org.in/Scripts/BS_ViewMasDirections.aspx?id=11566",
+        # VERIFIED working in your tested notebook
+        # (banking_llm_extraction_test_v3.ipynb) - direct PDF link, not
+        # RBI's own site (which returned 403 Forbidden when tested earlier).
+        "pdf_url": "https://allinonebanking.co.in/Master-Direction-Know-Your-Customer(KYC)Direction-2016-updated-August-14-2025.pdf",
         "confidence_threshold": 0.85,
         "sensitive_categories": ("cdd_obligations", "beneficial_owner", "penalties"),
         "high_risk_query_keywords": (
@@ -99,7 +102,13 @@ LAWS = {
     "pmla": {
         "label": "Prevention of Money Laundering Act, 2002 + Rules",
         "pillar": "RBI / KYC",
-        "pdf_url": "https://enforcementdirectorate.gov.in/pmla",
+        # VERIFIED working in your tested notebook - FIU-IND (the actual
+        # regulator that administers PMLA) publishes clean HTML with
+        # "Section N" headers already marked. indiacode.nic.in (the earlier
+        # source) returned a 504 Gateway Timeout. NOTE: this is a curated
+        # subset of the Act's key sections, not the exhaustive 1-75 - see
+        # your notebook's cell 0 note.
+        "html_url": "https://fiuindia.gov.in/files/AML_Legislation/pmla_2002.html",
         "confidence_threshold": 0.85,
         "sensitive_categories": ("obligations", "penalties", "reporting_duties"),
         "high_risk_query_keywords": (
@@ -132,7 +141,10 @@ LAWS = {
     "rbi_cyber": {
         "label": "RBI Cyber Security Framework + CERT-In Incident Reporting Rules",
         "pillar": "Cybersecurity",
-        "pdf_url": "https://www.rbi.org.in/Scripts/NotificationUser.aspx",
+        # VERIFIED working in your tested notebook - CERT-In's own direct
+        # PDF link, not RBI's general notifications page (too generic to
+        # reliably resolve to one specific document).
+        "pdf_url": "https://www.cert-in.org.in/PDF/CERT-In_Directions_70B_28.04.2022.pdf",
         "confidence_threshold": 0.85,
         "sensitive_categories": ("incident_reporting", "penalties"),
         "high_risk_query_keywords": (
