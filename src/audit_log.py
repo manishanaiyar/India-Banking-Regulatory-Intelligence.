@@ -6,75 +6,44 @@ zero new dependency, zero signup) - appropriate given this project's
 free-tier/no-signup constraints.
 
 Call log_query() once per /ask call (after retrieval, whether or not an
-answer was actually generated) and log_review_decision() from
-/approve-review-item, so every Checkpoint-1 and Checkpoint-2 decision has
-a permanent, exportable record.
+answer was actually generated), log_review_decision() from
+/approve-review-item, and log_ingestion_classification() once per section
+during ingestion - so every classification, review, and query decision
+has a permanent, exportable record.
 
-CHANGES from the original version (see conversation notes):
-1. reviewer_id is now a REQUIRED, structured field on review_decision_log
-   - separate from the free-text reviewer_note. The original version only
-   had reviewer_note, and main.py was passing the reviewer's identity
-   into that free-text field (`reviewer_note=decision.reviewer`) - which
-   meant "who approved this" and "any remarks about the decision" were
-   conflated into one unstructured column. A real accountable audit
-   trail needs the actor identity as its own field, queryable and
-   NOT-NULL, even before real auth exists (reviewer_id currently comes
-   from the same demo_reviewer default main.py already used - this
-   doesn't add auth, it just gives the identity its own honest column so
-   wiring up real auth later is a column-population change, not a
-   schema change). ACTION NEEDED: main.py's call to log_review_decision()
-   must change `reviewer_note=decision.reviewer` to
-   `reviewer_id=decision.reviewer` - see PATCH note at the bottom of
-   this docstring.
+CHANGES from the previous version:
 
-2. query_log_sections is a NEW normalized linking table (query_log_id,
-   section_id) replacing the old approach of only storing
-   retrieved_section_ids as a JSON blob inside query_log. The JSON blob
-   is NOT queryable by a specific section_id without loading and
-   parsing every row - it could not answer "which queries cited section
-   X" or "was section X reviewed after being cited in a query" without
-   a full-table scan and manual JSON parsing in Python. The normalized
-   table makes both of those a plain SQL JOIN - see
-   get_queries_citing_section() and get_review_history_for_section()
-   below. export_query_log() still returns retrieved_section_ids as a
-   list per row (reconstructed via JOIN) so any existing caller of that
-   function sees the same shape as before.
+1. reviewer_id is a REQUIRED, structured field on review_decision_log -
+   separate from the free-text reviewer_note. main.py must call this with
+   reviewer_id=..., not reviewer_note=... (that was a live bug - see
+   PATCH note below; main.py in this delivery already has it fixed).
 
-3. Immutability is now DB-ENFORCED, not just a design intention. SQLite
-   triggers on all three tables raise on any UPDATE or DELETE, so a bug
-   (or a person) can't silently alter or remove an audit record - they
-   get a SQLite error instead. This does NOT protect against someone
-   deleting the .db file itself or editing it outside SQLite's own
-   integrity checks - true tamper-evidence (e.g. hash-chaining each row
-   to the previous one) is a further step, not implemented here; noted
-   as a possible future enhancement rather than built now, to avoid
-   over-engineering an MVP that's still on a free-tier ephemeral disk
-   (see point 4).
+2. query_log_sections is a normalized linking table (query_log_id,
+   section_id) instead of a JSON blob, so "which queries cited section X"
+   is a plain SQL JOIN (get_queries_citing_section()) instead of a full-
+   table scan with manual JSON parsing.
 
-4. NOTE ON RENDER FREE TIER (unchanged from original, restated): SQLite
-   writes to a local file, which does NOT persist across a Render
-   free-tier cold restart (ephemeral filesystem), and does NOT share
-   state across multiple instances if this service is ever scaled
-   horizontally - each instance would see its own empty/independent
-   audit_log.db. Fine for a single-instance demo; before calling this
-   "production audit trail" for real compliance use, point DB_PATH at a
-   persistent volume or move to a hosted DB (Postgres, etc.) that
-   supports multiple concurrent writers.
+3. Immutability is DB-ENFORCED via SQLite triggers on all tables (UPDATE/
+   DELETE raise). This does not protect against someone deleting the .db
+   file itself - true tamper-evidence (hash-chaining) is a further step,
+   not implemented here, to avoid over-engineering an MVP still on a
+   free-tier ephemeral disk (see point 4).
 
-PATCH NEEDED IN main.py (one-line change, this file cannot make it for
-you since it doesn't touch main.py): in approve_review_item(), change
+4. NOTE ON RENDER FREE TIER: SQLite writes to a local file, which does
+   NOT persist across a Render free-tier cold restart (ephemeral
+   filesystem), and does NOT share state across multiple instances if
+   this service is ever scaled horizontally. Fine for a single-instance
+   demo; point DB_PATH at a persistent volume or move to Postgres before
+   calling this a real compliance audit trail.
 
-    audit_log.log_review_decision(
-        item_type="section", item_reference=decision.section_id, law_code=law,
-        decision=entry["status"], reviewer_note=decision.reviewer,
-    )
-
-to
-
-    audit_log.log_review_decision(
-        item_type="section", item_reference=decision.section_id, law_code=law,
-        decision=entry["status"], reviewer_id=decision.reviewer,
-    )
+5. NEW - ingestion_policy_log table + log_ingestion_classification() /
+   export_ingestion_log(). Previously the Policy Engine's classification
+   of user QUERIES was audited (via query_log.data_classes /
+   required_controls) but classification of the actual ingested
+   regulatory TEXT (every DPDP/KYC/PMLA/Cyber section) was not recorded
+   anywhere - dpdp_ingest.py / llm_ingest.py compute data_classes /
+   required_controls per section now, but nothing logged them. main.py's
+   ingestion loops now call this once per section.
 """
 
 from __future__ import annotations
@@ -118,15 +87,26 @@ CREATE TABLE IF NOT EXISTS review_decision_log (
     reviewer_note TEXT
 );
 
+CREATE TABLE IF NOT EXISTS ingestion_policy_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    law_code TEXT NOT NULL,
+    section_id TEXT NOT NULL,
+    data_classes TEXT,
+    required_controls TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_query_log_timestamp ON query_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_query_log_law ON query_log(law_code);
 CREATE INDEX IF NOT EXISTS idx_query_log_sections_section ON query_log_sections(section_id);
 CREATE INDEX IF NOT EXISTS idx_review_timestamp ON review_decision_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_review_item_reference ON review_decision_log(item_reference);
+CREATE INDEX IF NOT EXISTS idx_ingestion_policy_law ON ingestion_policy_log(law_code);
+CREATE INDEX IF NOT EXISTS idx_ingestion_policy_section ON ingestion_policy_log(section_id);
 
 -- Immutability: an audit trail that can be silently edited or deleted
 -- isn't an audit trail. These triggers make UPDATE/DELETE fail with a
--- SQLite error on all three tables, at the database level, rather than
+-- SQLite error on every table, at the database level, rather than
 -- relying on every caller to simply never do it.
 CREATE TRIGGER IF NOT EXISTS trg_query_log_no_update
 BEFORE UPDATE ON query_log
@@ -151,6 +131,14 @@ BEGIN SELECT RAISE(ABORT, 'review_decision_log is append-only: audit records can
 CREATE TRIGGER IF NOT EXISTS trg_review_decision_log_no_delete
 BEFORE DELETE ON review_decision_log
 BEGIN SELECT RAISE(ABORT, 'review_decision_log is append-only: audit records cannot be deleted'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_ingestion_policy_log_no_update
+BEFORE UPDATE ON ingestion_policy_log
+BEGIN SELECT RAISE(ABORT, 'ingestion_policy_log is append-only: audit records cannot be modified'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_ingestion_policy_log_no_delete
+BEFORE DELETE ON ingestion_policy_log
+BEGIN SELECT RAISE(ABORT, 'ingestion_policy_log is append-only: audit records cannot be deleted'); END;
 """
 
 
@@ -226,9 +214,8 @@ def log_review_decision(
     reviewer_note: str | None = None,
 ) -> int:
     """reviewer_id is who made the decision (structured, required).
-    reviewer_note is optional free-text remarks about the decision -
-    these are now two separate fields; see this module's docstring for
-    why they were merged before and why that was a problem."""
+    reviewer_note is optional free-text remarks - kept as two separate
+    fields so "who decided" is always queryable independent of remarks."""
     if decision not in ("approve", "reject", "approved", "rejected"):
         raise ValueError("decision must be an approve/reject value")
     if not reviewer_id:
@@ -243,6 +230,33 @@ def log_review_decision(
             """,
             (datetime.now(timezone.utc).isoformat(), item_type, item_reference,
              law_code, decision, reviewer_id, reviewer_note),
+        )
+        return cursor.lastrowid
+
+
+def log_ingestion_classification(
+    law_code: str,
+    section_id: str,
+    data_classes: list[str] | None,
+    required_controls: list[str] | None,
+) -> int:
+    """NEW: one row per ingested section, recording what the Policy
+    Engine classified it as at ingestion time - the "DATA CLASSIFICATION
+    -> POLICY ENGINE -> AUDIT & MONITORING" path from the architecture
+    diagram, for the document text itself (not just live queries)."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO ingestion_policy_log (
+                timestamp, law_code, section_id, data_classes, required_controls
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                law_code, section_id,
+                json.dumps(data_classes or []),
+                json.dumps(required_controls or []),
+            ),
         )
         return cursor.lastrowid
 
@@ -277,9 +291,24 @@ def export_review_log(limit: int = 1000) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+def export_ingestion_log(law_code: str | None = None, limit: int = 1000) -> list[dict]:
+    """NEW: paired with log_ingestion_classification() - lets /audit-log/
+    ingestion show every section's classification at ingestion time."""
+    with _connect() as conn:
+        if law_code:
+            rows = conn.execute(
+                "SELECT * FROM ingestion_policy_log WHERE law_code = ? ORDER BY id DESC LIMIT ?",
+                (law_code, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM ingestion_policy_log ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def get_queries_citing_section(section_id: str, limit: int = 100) -> list[dict]:
-    """NEW: every query that cited a given section - the other half of
-    the lineage that a JSON blob couldn't answer without a full scan."""
+    """Every query that cited a given section."""
     with _connect() as conn:
         rows = conn.execute(
             """
@@ -294,10 +323,9 @@ def get_queries_citing_section(section_id: str, limit: int = 100) -> list[dict]:
 
 
 def get_review_history_for_section(section_id: str) -> list[dict]:
-    """NEW: full decision history for one section (item_reference) -
-    a section can in principle be revisited (approved, later
-    re-flagged, reviewed again), and this returns that whole history in
-    order, oldest first."""
+    """Full decision history for one section (item_reference), oldest
+    first - a section can in principle be revisited (approved, later
+    re-flagged, reviewed again)."""
     with _connect() as conn:
         rows = conn.execute(
             "SELECT * FROM review_decision_log WHERE item_reference = ? ORDER BY id ASC",
@@ -324,6 +352,12 @@ if __name__ == "__main__":
         reviewer_note="Verified against source PDF page 12",
     )
     print(f"Logged review decision, id={review_id}")
+
+    ingestion_id = log_ingestion_classification(
+        law_code="dpdp", section_id="S33",
+        data_classes=["sensitive_data"], required_controls=["masking", "encryption", "tokenisation"],
+    )
+    print(f"Logged ingestion classification, id={ingestion_id}")
 
     print("Queries citing S33:", get_queries_citing_section("S33"))
     print("Review history for S33:", get_review_history_for_section("S33"))
