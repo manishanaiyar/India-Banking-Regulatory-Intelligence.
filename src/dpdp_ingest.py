@@ -1,10 +1,20 @@
 """
 Ingestion pipeline: fetch the official PDF -> split into numbered sections ->
-tag each section with rule-based categories -> score a confidence heuristic.
+tag each section with rule-based categories -> score a confidence heuristic
+-> classify each section against the Data Classification / Policy Engine.
 
 Pure functions with no side effects on the stores, so they're easy to unit
-test in isolation (see the sanity-check cell in the notebook) and easy to
-swap out later for a real LLM extraction agent (see README "grows into").
+test in isolation and easy to swap out later for a real LLM extraction
+agent.
+
+CHANGED: build_tagged_sections() now also calls policy_engine.evaluate()
+on every section's raw text. Previously the "DATA CLASSIFICATION" box on
+the architecture diagram only ever ran against live user queries inside
+main.py's _stream_answer() - the actual ingested Act text was never
+classified. Every section committed to the KnowledgeStore now carries
+data_classes / required_controls / policy_rationale, and a section that
+matches "sensitive_data" is now force-flagged for human review regardless
+of the regex-based `is_sensitive()` check below.
 """
 
 import logging
@@ -18,6 +28,7 @@ from src.dpdp_config import (
     CHAPTER_MAP, DPDP_PDF_URL, LOCAL_PDF_PATH, SECTION_TITLES,
     SENSITIVE_CATEGORIES, chapter_for_section,
 )
+from src.policy_engine import evaluate as evaluate_policy
 
 logger = logging.getLogger("dpdp.ingest")
 
@@ -147,14 +158,31 @@ def is_sensitive(entities: dict) -> bool:
 
 
 def build_tagged_sections(pdf_path: str, max_section: int = 44) -> list[dict]:
-    """End-to-end: parse -> tag -> score. Returns sections ready for the
-    review gate; does not touch Qdrant/Neo4j (see dpdp_stores.py)."""
+    """End-to-end: parse -> tag -> score -> classify. Returns sections
+    ready for the review gate; does not touch Neo4j (see dpdp_stores.py).
+
+    Each section now also carries data_classes / required_controls /
+    policy_rationale from the Policy Engine (policy_engine.evaluate()),
+    run against the section's own raw text - this is the "DATA
+    CLASSIFICATION" step from the architecture diagram, applied at
+    ingestion time rather than only at query time."""
     raw_text = extract_text(pdf_path)
     sections = split_into_sections(raw_text, max_section)
     for section in sections:
         section["entities"] = tag_entities(section)
         section["confidence"] = estimate_confidence(section)
         section["sensitive"] = is_sensitive(section["entities"])
+
+        policy_result = evaluate_policy(section["raw_text"])
+        section["data_classes"] = policy_result.data_classes
+        section["required_controls"] = policy_result.required_controls
+        section["policy_rationale"] = policy_result.rationale
+        if "sensitive_data" in policy_result.data_classes:
+            # Highest-risk classification per banking_config.POLICY_MAP -
+            # force human review even if the regex-based entity tagging
+            # above didn't already flag this section as sensitive.
+            section["sensitive"] = True
+
     if len(sections) < max_section:
         missing = sorted(set(range(1, max_section + 1)) - {s["number"] for s in sections})
         logger.warning(
@@ -163,5 +191,5 @@ def build_tagged_sections(pdf_path: str, max_section: int = 44) -> list[dict]:
             len(sections), max_section, missing,
         )
     else:
-        logger.info("Parsed and tagged %d/%d sections", len(sections), max_section)
+        logger.info("Parsed, tagged, and classified %d/%d sections", len(sections), max_section)
     return sections
