@@ -1,56 +1,44 @@
 """
 llm_ingest.py
 -------------
-LLM-based section extraction, adapted from your tested
+LLM-based section extraction, adapted from the tested
 banking_llm_extraction_test_v3.ipynb notebook. Replaces the earlier
 regex-based approach in ingest_common.py for KYC and Cyber (both still
 irregularly-formatted PDFs where a fixed regex is fragile); PMLA uses a
 faster, LLM-free header-split since fiuindia.gov.in already marks
 "Section N" boundaries in clean HTML.
 
-Two real fixes carried over from your notebook, preserved here exactly:
+Two real fixes carried over from the notebook, preserved here exactly:
   1. chunk_text() hard-splits an oversized single "paragraph" by character
      count as a last resort - the KYC PDF's extracted text has no blank
      lines, so naive paragraph-splitting alone silently produced one giant
      46k-char chunk that the LLM would have choked on or truncated badly.
   2. PMLA source is fiuindia.gov.in (FIU-IND, the actual regulator), not
      indiacode.nic.in - the latter 504'd. Note this is a curated subset of
-     the Act's key sections, not the exhaustive 1-75, per your notebook.
+     the Act's key sections, not the exhaustive 1-75.
 
-Changes made when integrating into the project (all deliberate, listed so
-nothing here is a silent surprise):
-  - GROQ_API_KEY / GROQ_MODEL now come from dpdp_config.py (the same
-    values your existing /ask endpoint already uses via groq_client.py),
-    not an interactive getpass() prompt - this runs on a server, not in a
-    notebook.
-  - Category vocabulary changed from the notebook's capitalized-singular
-    ("Obligation", "Penalty") to this project's lowercase-plural
-    ("obligations", "penalties") - matching dpdp_config.SENSITIVE_CATEGORIES
-    and banking_config.LAWS[...]["sensitive_categories"] exactly. Using the
-    notebook's original vocabulary here would have silently broken the
-    sensitive-flagging check the same way the singular/plural mismatch did
-    in ingest_common.py before that was fixed - see INTEGRATION_GUIDE.md.
-  - Function names (ingest_kyc, ingest_pmla, ingest_cyber) match what
-    main.py already imports from kyc_pmla_ingest.py / cyber_ingest.py -
-    see those two files, now thin wrappers around this module. main.py
-    itself needs ZERO changes for this integration.
+CHANGED (this revision): every section produced by llm_extract_sections()
+and ingest_pmla() now also carries data_classes / required_controls from
+policy_engine.evaluate() - the same Data Classification step now applied
+to DPDP in dpdp_ingest.py. A section matching "sensitive_data" is forced
+into human review regardless of the LLM's confidence or the verbatim
+check, for the same reason dpdp_ingest.py does this: highest-risk data
+per banking_config.POLICY_MAP should never auto-approve.
 
-IMPORTANT - NOT RUNTIME-TESTED END TO END: this sandbox has no network
-access, so the actual fetch/LLM calls could not be executed here (same
-limitation noted for the RBI 403 test earlier). What WAS tested: the pure
-logic (chunk_text, strip_html_tags, split_pmla_sections, category-mapping,
-and the output shape's compatibility with real dpdp_stores.commit_section())
-- see test_llm_ingest.py. Run ingest_kyc()/ingest_pmla()/ingest_cyber()
-yourself once, exactly as you did in the notebook, before wiring this into
-a live human-review workflow.
+IMPORTANT - NOT RUNTIME-TESTED END TO END: no network access was
+available to run the actual fetch/LLM calls end to end. What WAS tested:
+the pure logic (chunk_text, strip_html_tags, split_pmla_sections,
+category-mapping, and the output shape's compatibility with real
+dpdp_stores.commit_section()). Run ingest_kyc()/ingest_pmla()/
+ingest_cyber() yourself once, exactly as in the notebook, before wiring
+this into a live human-review workflow.
 
 OPERATIONAL WARNING - this is SLOW, do not call synchronously from a web
 request without reading this: SLEEP_BETWEEN_CALLS_SECONDS = 65 (Groq free
 tier rate limiting) means a ~47k-char document chunked at 9000 chars/chunk
 (~6 chunks) takes roughly 5-6 minutes end to end. Render's default request
-timeout is well under that. See INTEGRATION_GUIDE.md for the recommended
-pattern (run offline, cache the JSON, load it at deploy time) rather than
-calling this live from POST /ingest/{law_code}.
+timeout is well under that - main.py schedules this as a BackgroundTask,
+never call it synchronously inside a request handler.
 """
 
 from __future__ import annotations
@@ -66,23 +54,20 @@ import requests
 
 from . import dpdp_config as cfg
 from .banking_config import LAWS
+from .policy_engine import evaluate as evaluate_policy
 
 logger = logging.getLogger("llm_ingest")
 
 USER_AGENT = "banking-regulatory-intelligence-ingest/1.0 (+internal compliance tool)"
 
 # Lowercase-plural, matching dpdp_config.SENSITIVE_CATEGORIES and
-# banking_config.py's per-law sensitive_categories tuples - see this
-# module's docstring for why this must stay consistent with those.
+# banking_config.py's per-law sensitive_categories tuples.
 SENSITIVE_CATEGORIES = {"obligations", "penalties"}
 CONFIDENCE_THRESHOLD = 0.85
 SLEEP_BETWEEN_CALLS_SECONDS = 65
 
 # Maps the LLM's output category (capitalized singular, per the extraction
-# prompt below - deliberately NOT changed from your tested prompt, since
-# prompt wording changes are exactly the kind of thing that should be
-# re-tested before trusting new output) to this project's internal
-# lowercase-plural vocabulary.
+# prompt below) to this project's internal lowercase-plural vocabulary.
 _CATEGORY_TO_PROJECT_VOCAB = {
     "Obligation": "obligations",
     "Right": "rights",
@@ -97,8 +82,7 @@ class IngestError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Fetch helpers - unchanged from your notebook (already handle retries and
-# validate content-type, same defensive pattern as ingest_common.py).
+# Fetch helpers
 # ---------------------------------------------------------------------------
 def fetch_pdf_bytes(url: str, timeout: int = 90, retries: int = 2) -> bytes:
     last_exc = None
@@ -147,9 +131,7 @@ def fetch_html_text(url: str, timeout: int = 60, retries: int = 2) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Chunking - identical to your fixed v3 notebook version, including the
-# embedded self-test that runs at import time so a chunking regression is
-# caught immediately rather than mid-ingest.
+# Chunking
 # ---------------------------------------------------------------------------
 def chunk_text(text: str, target_chars: int = 9000) -> list[str]:
     paragraphs = re.split(r"\n\s*\n", text)
@@ -190,10 +172,8 @@ _chunk_text_self_test()
 
 
 # ---------------------------------------------------------------------------
-# LLM extraction agent - system prompt UNCHANGED from your tested notebook
-# version (deliberately - prompt wording is exactly the part you already
-# validated produces good extractions; changing wording here without
-# re-testing would undermine that).
+# LLM extraction agent - system prompt unchanged from the tested notebook
+# version.
 # ---------------------------------------------------------------------------
 EXTRACTION_SYSTEM_PROMPT = """You are a precise regulatory-document parsing agent.
 
@@ -231,7 +211,7 @@ def _call_groq_json(chapter_label: str, chunk: str, retries: int = 3) -> dict:
     if not cfg.GROQ_API_KEY:
         raise IngestError(
             "GROQ_API_KEY is not set (checked dpdp_config.GROQ_API_KEY - same "
-            "env var your /ask endpoint already uses). Set it in Render's "
+            "env var the /ask endpoint already uses). Set it in Render's "
             "Environment tab before running LLM-based ingestion."
         )
     for attempt in range(1, retries + 1):
@@ -269,28 +249,19 @@ def _call_groq_json(chapter_label: str, chunk: str, retries: int = 3) -> dict:
 
 
 def _normalize_for_comparison(text: str) -> str:
-    """Collapses all whitespace runs (including PDF-extraction line breaks
-    that don't correspond to real paragraph breaks) so verbatim comparison
-    isn't thrown off by re-wrapping - only real content differences should
-    lower the score, not line-wrap position."""
+    """Collapses all whitespace runs so verbatim comparison isn't thrown
+    off by re-wrapping - only real content differences should lower the
+    score, not line-wrap position."""
     return re.sub(r"\s+", " ", text).strip()
 
 
 def verbatim_overlap_ratio(extracted_text: str, source_text: str) -> float:
     """Longest-common-run overlap between extracted_text and source_text,
-    as a fraction of extracted_text's length. 1.0 means extracted_text (or
-    a whitespace-reflowed version of it) is a genuine contiguous substring
-    of the source. Lower values mean the LLM likely paraphrased, merged
-    content from elsewhere, or otherwise didn't copy verbatim as the
-    extraction prompt instructs it to.
-
-    This exists because CONFIDENCE_THRESHOLD (the LLM's own self-reported
-    confidence) does NOT catch this failure mode - real production output
-    showed a section tagged confidence=0.94 (comfortably above the 0.85
-    threshold) that was only 65% verbatim-verifiable, because the LLM had
-    merged/paraphrased text from an adjacent clause. The LLM can be
-    confident about the wrong thing. This check is independent of the
-    LLM's self-assessment."""
+    as a fraction of extracted_text's length. This exists because
+    CONFIDENCE_THRESHOLD (the LLM's own self-reported confidence) does NOT
+    catch paraphrasing/merging failures - the LLM can be confident about
+    the wrong thing. This check is independent of the LLM's self-
+    assessment."""
     extracted_norm = _normalize_for_comparison(extracted_text)
     source_norm = _normalize_for_comparison(source_text)
     if not extracted_norm:
@@ -303,8 +274,7 @@ def verbatim_overlap_ratio(extracted_text: str, source_text: str) -> float:
 
 
 # Below this ratio, a section is forced into human review regardless of
-# the LLM's own confidence score - see verbatim_overlap_ratio()'s
-# docstring for why confidence alone isn't sufficient.
+# the LLM's own confidence score.
 VERBATIM_OVERLAP_THRESHOLD = 0.90
 
 
@@ -317,16 +287,19 @@ def _build_entities(project_category: str | None, title: str) -> dict:
 
 def llm_extract_sections(law_code: str, full_text: str, chapter_label: str, source_url: str) -> list[dict]:
     """Chunk the document, call the LLM per chunk, and return sections in
-    the project's standard shape (same as ingest_common.py's output -
-    verified compatible with dpdp_stores.KnowledgeStore.commit_section()
-    and main.py's needs_review check).
+    the project's standard shape - verified compatible with
+    dpdp_stores.KnowledgeStore.commit_section() and main.py's needs_review
+    check.
 
     Each extracted item's raw_text is verified against the CHUNK it came
-    from (not the whole document - faster, and the chunk is exactly what
-    the LLM actually saw) via verbatim_overlap_ratio(). Items scoring
-    below VERBATIM_OVERLAP_THRESHOLD are forced sensitive=True regardless
-    of the LLM's reported confidence - see that function's docstring for
-    the real production case that motivated this."""
+    from via verbatim_overlap_ratio(). Items scoring below
+    VERBATIM_OVERLAP_THRESHOLD are forced sensitive=True regardless of the
+    LLM's reported confidence.
+
+    CHANGED: each item is now also run through policy_engine.evaluate()
+    (Data Classification) - a match on "sensitive_data" additionally
+    forces sensitive=True, same as the verbatim-check and DPDP's
+    ingestion path in dpdp_ingest.py."""
     chunks = chunk_text(full_text, target_chars=9000)
     logger.info("law=%s split into %d chunk(s)", law_code, len(chunks))
 
@@ -363,10 +336,13 @@ def llm_extract_sections(law_code: str, full_text: str, chapter_label: str, sour
                 VERBATIM_OVERLAP_THRESHOLD * 100, confidence,
             )
 
+        policy_result = evaluate_policy(raw_text)
+
         sensitive = (
             project_category in SENSITIVE_CATEGORIES
             or confidence < CONFIDENCE_THRESHOLD
             or not verbatim_ok
+            or "sensitive_data" in policy_result.data_classes
         )
         title = item.get("title", "")[:200]
         section_number = item.get("section_number", "?")
@@ -385,6 +361,9 @@ def llm_extract_sections(law_code: str, full_text: str, chapter_label: str, sour
             "fetched_at": fetched_at,
             "verbatim_overlap": round(overlap, 3),
             "verbatim_verified": verbatim_ok,
+            "data_classes": policy_result.data_classes,
+            "required_controls": policy_result.required_controls,
+            "policy_rationale": policy_result.rationale,
         })
     logger.info(
         "LLM extracted %d total sections for law=%s (%d failed verbatim check -> forced to review)",
@@ -394,9 +373,7 @@ def llm_extract_sections(law_code: str, full_text: str, chapter_label: str, sour
 
 
 # ---------------------------------------------------------------------------
-# PMLA-specific: header-split on fiuindia.gov.in's clean HTML. No LLM call
-# needed for section boundaries - the "Section N" headers already do that
-# reliably, per your notebook's finding.
+# PMLA-specific: header-split on fiuindia.gov.in's clean HTML.
 # ---------------------------------------------------------------------------
 def strip_html_tags(html: str) -> str:
     html = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.DOTALL | re.IGNORECASE)
@@ -427,9 +404,9 @@ def split_pmla_sections(full_text: str) -> list[tuple[str, str, str]]:
 
 
 def _classify_pmla_section(body: str) -> str:
-    """Simple keyword rule, same as your notebook - PMLA's clean HTML
-    doesn't need the LLM for boundaries, and this per-section classification
-    was already fast/accurate enough without one either."""
+    """Simple keyword rule - PMLA's clean HTML doesn't need the LLM for
+    boundaries, and this per-section classification was already fast/
+    accurate enough without one either."""
     body_lower = body.lower()
     if "penalty" in body_lower or "fine" in body_lower or "punish" in body_lower:
         return "penalties"
@@ -440,8 +417,8 @@ def _classify_pmla_section(body: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Public entry points - SAME NAMES as kyc_pmla_ingest.py / cyber_ingest.py
-# already export, so those two files become thin wrappers (see their
-# updated contents) and main.py needs no changes at all.
+# already export, so those two files remain thin wrappers and main.py
+# needs no changes for this module's internals.
 # ---------------------------------------------------------------------------
 def ingest_kyc() -> list[dict]:
     law_cfg = LAWS["kyc_aml"]
@@ -467,7 +444,8 @@ def ingest_pmla() -> list[dict]:
     sections = []
     for section_number, title, body in parts:
         category = _classify_pmla_section(body)
-        sensitive = category in SENSITIVE_CATEGORIES
+        policy_result = evaluate_policy(body)
+        sensitive = category in SENSITIVE_CATEGORIES or "sensitive_data" in policy_result.data_classes
         sections.append({
             "id": f"pmla:{section_number}",
             "title": title,
@@ -480,6 +458,9 @@ def ingest_pmla() -> list[dict]:
             "law_code": "pmla",
             "category": category,
             "fetched_at": fetched_at,
+            "data_classes": policy_result.data_classes,
+            "required_controls": policy_result.required_controls,
+            "policy_rationale": policy_result.rationale,
         })
     logger.info("pmla: %d sections via header split", len(sections))
     return sections
