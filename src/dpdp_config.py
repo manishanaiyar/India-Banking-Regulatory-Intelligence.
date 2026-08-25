@@ -39,6 +39,28 @@ GROQ_MAX_TOKENS = 1024
 GROQ_TIMEOUT_SECONDS = 30
 
 # ---------------------------------------------------------------------------
+# Admin auth (BUG FIX - was previously never defined here at all, so
+# main.py's `getattr(cfg, "ADMIN_API_KEY", None)` always returned None no
+# matter what you set in Render's Environment tab. POST /ingest/{law} and
+# POST /approve-review-item were silently running with auth DISABLED.
+# This is the actual read of the env var; main.py's getattr() now finds
+# it. Set ADMIN_API_KEY in Render's Environment tab before any real
+# deployment - generate one with, e.g., `python -c "import secrets;
+# print(secrets.token_urlsafe(32))"`.
+# ---------------------------------------------------------------------------
+ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
+
+# ---------------------------------------------------------------------------
+# Encryption key for the Policy Engine's actual enforcement layer (see
+# crypto_utils.py). Optional - a random key is generated in-memory if
+# unset, but that means encrypted values won't decrypt after a restart.
+# Set this in Render's Environment tab for real deployments. Generate
+# with: python -c "from cryptography.fernet import Fernet;
+# print(Fernet.generate_key().decode())"
+# ---------------------------------------------------------------------------
+POLICY_ENCRYPTION_KEY = os.environ.get("POLICY_ENCRYPTION_KEY", "")
+
+# ---------------------------------------------------------------------------
 # CORS - the frontend lives on a different domain (Vercel) than the backend
 # (Render), so this must be set explicitly. "*" is fine for a public demo
 # with no accounts/sensitive data; tighten to your exact Vercel URL once
@@ -65,13 +87,6 @@ CONTEXT_CHAR_LIMIT = 800  # per-section chars included in the LLM prompt
 # TF-IDF cosine similarity scores run on a DIFFERENT scale than the
 # sentence-transformer embeddings used in the Colab/Codespaces version -
 # thresholds tuned for embeddings (e.g. 0.30) would over-refuse here.
-# TF-IDF is purely lexical (keyword overlap), so it's naturally stricter
-# about wording than a semantic embedding would be: a question that shares
-# almost no vocabulary with the relevant section (e.g. a heavily paraphrased
-# question) may score lower than it would have with embeddings, even when
-# genuinely in scope. That's the real trade-off of trading RAM for a
-# lighter-weight retrieval method - test with your own realistic phrasings
-# and adjust these two numbers if you see too many false "not found" results.
 SIMILARITY_THRESHOLD = 0.12
 HARD_CUTOFF = 0.04
 
