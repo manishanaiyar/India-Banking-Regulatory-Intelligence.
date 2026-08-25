@@ -6,8 +6,16 @@ This is the Render/AuraDB adaptation of the original VectorGraphStore: no
 sentence-transformers, no Qdrant - both replaced to fit a 512MB free-tier
 RAM budget (see tfidf_search.py for why, and dpdp_config.py for the
 threshold trade-offs that come with it). ReviewQueue, AnswerCache, and
-RateLimiter are unchanged from the local version - they never depended on
-the embedding/vector stack in the first place.
+RateLimiter are unchanged in shape from the local version - they never
+depended on the embedding/vector stack in the first place.
+
+CHANGED: commit_section() now also writes data_classes / required_controls
+onto the Neo4j Section node (populated by dpdp_ingest.py / llm_ingest.py's
+Policy Engine hook), and ReviewQueue.register() now surfaces those same
+fields on each queue entry, so a reviewer can see WHY a section needs
+extra scrutiny (e.g. "sensitive_data -> masking, encryption, tokenisation
+recommended") directly from /pending-review, not just from a separate
+/evaluate call.
 """
 
 import logging
@@ -49,7 +57,12 @@ class KnowledgeStore:
     def commit_section(self, section: dict) -> None:
         """Write one approved section into Neo4j (graph) and refit the
         TF-IDF index over all committed sections' text (cheap at <=44
-        sections - a full refit, not an incremental update)."""
+        sections - a full refit, not an incremental update).
+
+        data_classes / required_controls are written onto the node too
+        (empty lists if the ingestion path didn't set them, e.g. older
+        cached sections) so the graph itself records the Policy Engine's
+        classification, not just the in-memory ReviewQueue entry."""
         with self._lock:
             self._committed[section["id"]] = section
             self.tfidf.fit({sid: s["raw_text"] for sid, s in self._committed.items()})
@@ -57,8 +70,11 @@ class KnowledgeStore:
         if self.neo4j is not None:
             with self.neo4j.session() as session:
                 session.run(
-                    "MERGE (s:Section {id: $id}) SET s.title = $title, s.source_url = $url",
+                    "MERGE (s:Section {id: $id}) SET s.title = $title, s.source_url = $url, "
+                    "s.data_classes = $data_classes, s.required_controls = $required_controls",
                     id=section["id"], title=section["title"], url=section["source_url"],
+                    data_classes=section.get("data_classes", []),
+                    required_controls=section.get("required_controls", []),
                 )
                 entities = section["entities"]
                 for label, items in (
@@ -118,6 +134,8 @@ class ReviewQueue:
                 "chapter": section["chapter"],
                 "confidence": section["confidence"],
                 "sensitive": section["sensitive"],
+                "data_classes": section.get("data_classes", []),
+                "required_controls": section.get("required_controls", []),
                 "status": "pending_review" if needs_review else "auto_approved",
                 "reviewed_by": None,
                 "reviewed_at": None,
