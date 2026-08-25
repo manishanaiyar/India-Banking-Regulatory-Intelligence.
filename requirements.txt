@@ -3,3 +3,4 @@ uvicorn
 pypdf
 requests
 neo4j
+echo "cryptography>=42.0.0" >> requirements.txt
