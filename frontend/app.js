@@ -57,6 +57,30 @@ const LAWS = {
       { q: "What is the timeline for incident reporting?", label: "Incident reporting timeline" },
     ],
   },
+  gdpr: {
+    label: "GDPR (EU) 2016/679",
+    pillar: "Privacy",
+    heading: "Ask about the EU GDPR",
+    subtitle: "Grounded in the full text of Regulation (EU) 2016/679 - all 99 Articles.",
+    footer: "Source: EUR-Lex, Regulation (EU) 2016/679",
+    suggestions: [
+      { q: "What is required for valid consent under GDPR?", label: "Conditions for consent" },
+      { q: "What is the deadline for reporting a personal data breach?", label: "Data breach notification deadline" },
+      { q: "What fines can be imposed for non-compliance?", label: "Administrative fines" },
+    ],
+  },
+  irdai: {
+    label: "IRDAI Policyholders' Interests Regulations",
+    pillar: "Insurance",
+    heading: "Ask about IRDAI policyholder protection rules",
+    subtitle: "Grounded in the IRDAI (Protection of Policyholders' Interests) Regulations, 2017.",
+    footer: "Source: IRDAI (Protection of Policyholders' Interests) Regulations, 2017",
+    suggestions: [
+      { q: "What is the free look period for a life insurance policy?", label: "Free look period" },
+      { q: "How should an insurer handle claim repudiation?", label: "Claim repudiation" },
+      { q: "What is the timeline for grievance redressal?", label: "Grievance redressal timeline" },
+    ],
+  },
 };
 const LAW_CODES = Object.keys(LAWS);
 
