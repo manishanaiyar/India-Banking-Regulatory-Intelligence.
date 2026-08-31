@@ -69,7 +69,7 @@ LAWS = {
         # VERIFIED working in your tested notebook
         # (banking_llm_extraction_test_v3.ipynb) - direct PDF link, not
         # RBI's own site (which returned 403 Forbidden when tested earlier).
-        "pdf_url": "https://allinonebanking.co.in/Master-Direction-Know-Your-Customer(KYC)Direction-2016-updated-August-14-2025.pdf",
+        "pdf_url": "https://rbidocs.rbi.org.in/rdocs/notification/PDFs/MD18KYCF6E92C82E1E1419D87323E3869BC9F13.PDF",
         "confidence_threshold": 0.85,
         "sensitive_categories": ("cdd_obligations", "beneficial_owner", "penalties"),
         "high_risk_query_keywords": (
@@ -182,7 +182,11 @@ LAWS = {
         # text (99 Articles, 11 Chapters), not a curated subset, per
         # explicit request. See src/gdpr_ingest.py / src/gdpr_data.py for
         # the parsing approach and the full article-title map.
-        "pdf_url": "https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=CELEX:32016R0679",
+        # NOTE: eur-lex.europa.eu's PDF endpoint returns HTTP 202 with an
+        # empty body for automated requests (confirmed via live test) -
+        # it appears to require a browser session/cookie. Using a mirror
+        # of the same official full text that resolves reliably instead.
+        "pdf_url": "https://gdpr.eu.org/full/full.pdf",
         "confidence_threshold": 0.85,
         "sensitive_categories": ("obligations", "penalties"),
         "high_risk_query_keywords": (
@@ -217,11 +221,12 @@ LAWS = {
     "irdai": {
         "label": "IRDAI (Protection of Policyholders' Interests) Regulations, 2017",
         "pillar": "Insurance",
-        # Government-hosted mirror of the regulation text - see
-        # src/irdai_ingest.py's module docstring for the sourcing note
-        # (irdai.gov.in's own document-detail pages block automated
-        # fetches). Verify this URL before a real deployment.
-        "pdf_url": "https://gujhealth.gujarat.gov.in/images/pdf/Act/irda-protection-of-policyholders-interests-regulations.pdf",
+        # NOTE: the previous PDF mirror (gujhealth.gujarat.gov.in) was
+        # unreachable in live testing (connection error). Using a stable
+        # HTML source with the full regulation text instead - see
+        # src/irdai_ingest.py, which now does an HTML header-split
+        # (same technique as PMLA's html_url) rather than a PDF parse.
+        "html_url": "https://taxguru.in/corporate-law/irda-protection-of-policyholders-interests-regulations-2017.html",
         "confidence_threshold": 0.85,
         "sensitive_categories": ("obligations", "penalties"),
         "high_risk_query_keywords": (
