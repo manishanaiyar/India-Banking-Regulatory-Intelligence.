@@ -138,6 +138,11 @@ def run_ingestion() -> None:
             if not needs_review:
                 store.commit_section(section)
                 auto_approved += 1
+            audit_log.log_ingestion_classification(
+                law_code="dpdp", section_id=section["id"],
+                data_classes=section.get("data_classes"),
+                required_controls=section.get("required_controls"),
+            )
 
         logger.info(
             "DPDP ingestion complete: %d/%d auto-approved and indexed, %d pending human review.",
@@ -158,7 +163,7 @@ def run_ingestion() -> None:
 # llm_ingest.py namespace every section id as "<law_code>:<section_number>"
 # to avoid collisions with DPDP's own "S1".."S44" ids.
 # ---------------------------------------------------------------------------
-NEW_LAW_CODES = ("kyc_aml", "pmla", "rbi_cyber")
+NEW_LAW_CODES = ("kyc_aml", "pmla", "rbi_cyber", "gdpr", "irdai")
 
 _stores: dict[str, KnowledgeStore] = {"dpdp": store}
 _review_queues: dict[str, ReviewQueue] = {"dpdp": review_queue}
@@ -206,6 +211,10 @@ def _run_ingestion_for_law_background(law: str) -> None:
             from src.kyc_pmla_ingest import ingest_pmla as _ingest_fn
         elif law == "rbi_cyber":
             from src.cyber_ingest import ingest_cyber as _ingest_fn
+        elif law == "gdpr":
+            from src.gdpr_ingest import ingest_gdpr as _ingest_fn
+        elif law == "irdai":
+            from src.irdai_ingest import ingest_irdai as _ingest_fn
         else:
             raise ValueError(f"Unknown law code: {law}")
 
@@ -221,6 +230,11 @@ def _run_ingestion_for_law_background(law: str) -> None:
             if not needs_review:
                 st.commit_section(section)
                 auto_approved += 1
+            audit_log.log_ingestion_classification(
+                law_code=law, section_id=section["id"],
+                data_classes=section.get("data_classes"),
+                required_controls=section.get("required_controls"),
+            )
 
         logger.info(
             "Ingestion complete for %s: %d/%d auto-approved and indexed, %d pending human review.",
@@ -240,8 +254,8 @@ def _run_ingestion_for_law_background(law: str) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    run_ingestion()  # DPDP only - other laws are on-demand via POST /ingest/{law}
     audit_log.init_db()
+    run_ingestion()  # DPDP only - other laws are on-demand via POST /ingest/{law}
     yield
 
 
@@ -410,7 +424,7 @@ def approve_review_item(
 
     audit_log.log_review_decision(
         item_type="section", item_reference=decision.section_id, law_code=law,
-        decision=entry["status"], reviewer_note=decision.reviewer,
+        decision=entry["status"], reviewer_id=decision.reviewer,
     )
 
     return {"section_id": decision.section_id, "new_status": entry["status"]}
@@ -485,6 +499,11 @@ def get_audit_log(law: Optional[str] = Query(default=None), limit: int = Query(d
 @app.get("/audit-log/reviews")
 def get_review_log(limit: int = Query(default=200, le=2000)):
     return audit_log.export_review_log(limit=limit)
+
+
+@app.get("/audit-log/ingestion")
+def get_ingestion_log(law: Optional[str] = Query(default=None), limit: int = Query(default=200, le=2000)):
+    return audit_log.export_ingestion_log(law_code=law, limit=limit)
 
 
 # ---------------------------------------------------------------------------

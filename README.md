@@ -120,7 +120,7 @@ backend's API URL directly (CORS via `ALLOWED_ORIGIN`).
 
 **Backend (FastAPI, Python runtime), from repo root:**
 - Build command: `pip install -r requirements.txt`
-- Start command: `uvicorn src.main:app --host 0.0.0.0 --port $PORT`
+- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
 - Required environment variables:
 
   | Variable | Purpose |
