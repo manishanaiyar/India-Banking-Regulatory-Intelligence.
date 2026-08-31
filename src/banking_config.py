@@ -175,6 +175,85 @@ LAWS = {
             "about this specific regulation."
         ),
     },
+    "gdpr": {
+        "label": "General Data Protection Regulation (EU) 2016/679 (GDPR)",
+        "pillar": "Privacy",
+        # Official EUR-Lex PDF of the consolidated regulation - the FULL
+        # text (99 Articles, 11 Chapters), not a curated subset, per
+        # explicit request. See src/gdpr_ingest.py / src/gdpr_data.py for
+        # the parsing approach and the full article-title map.
+        "pdf_url": "https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=CELEX:32016R0679",
+        "confidence_threshold": 0.85,
+        "sensitive_categories": ("obligations", "penalties"),
+        "high_risk_query_keywords": (
+            "fine", "penalty", "administrative fine", "data breach",
+            "72 hours", "special category", "special categories",
+            "cross-border transfer", "adequacy decision", "sanction",
+        ),
+        "retrieval_top_k": 5,
+        "context_char_limit": 800,
+        "similarity_threshold": 0.12,
+        "hard_cutoff": 0.04,
+        "system_prompt": (
+            "You are a legal-reference assistant for the EU General Data Protection "
+            "Regulation (GDPR), Regulation (EU) 2016/679, ONLY. Follow these rules "
+            "strictly:\n"
+            "1. Answer using ONLY the numbered [S<n>] context sections provided "
+            "below. Never use outside knowledge about other privacy laws (e.g. "
+            "DPDP, CCPA) not present in the given context.\n"
+            "2. If the context does not contain enough information, reply with "
+            "exactly: \"I don't have information about this in the GDPR based on "
+            "what's currently indexed.\" Do not guess.\n"
+            "3. Keep answers concise (2-4 sentences), plain language, and "
+            "reference Article numbers only from the context given - never "
+            "invent an Article number.\n"
+            "4. This is informational only, not legal advice."
+        ),
+        "not_found_note": (
+            "I couldn't find anything about this in the GDPR. This assistant "
+            "only answers questions about this specific regulation."
+        ),
+    },
+    "irdai": {
+        "label": "IRDAI (Protection of Policyholders' Interests) Regulations, 2017",
+        "pillar": "Insurance",
+        # Government-hosted mirror of the regulation text - see
+        # src/irdai_ingest.py's module docstring for the sourcing note
+        # (irdai.gov.in's own document-detail pages block automated
+        # fetches). Verify this URL before a real deployment.
+        "pdf_url": "https://gujhealth.gujarat.gov.in/images/pdf/Act/irda-protection-of-policyholders-interests-regulations.pdf",
+        "confidence_threshold": 0.85,
+        "sensitive_categories": ("obligations", "penalties"),
+        "high_risk_query_keywords": (
+            "penalty", "claim rejection", "repudiation", "grievance",
+            "free look period", "surrender value", "mis-selling",
+            "grace period", "ombudsman",
+        ),
+        "retrieval_top_k": 5,
+        "context_char_limit": 800,
+        "similarity_threshold": 0.12,
+        "hard_cutoff": 0.04,
+        "system_prompt": (
+            "You are a legal-reference assistant for the IRDAI (Protection of "
+            "Policyholders' Interests) Regulations, 2017 ONLY. Follow these "
+            "rules strictly:\n"
+            "1. Answer using ONLY the numbered [S<n>] context sections provided "
+            "below. Never use outside knowledge about other regulations not "
+            "present in the given context.\n"
+            "2. If the context does not contain enough information, reply with "
+            "exactly: \"I don't have information about this in the IRDAI "
+            "Protection of Policyholders' Interests Regulations based on what's "
+            "currently indexed.\" Do not guess.\n"
+            "3. Keep answers concise (2-4 sentences), plain language, and "
+            "reference regulation numbers only from the context given.\n"
+            "4. This is informational only, not legal or compliance advice."
+        ),
+        "not_found_note": (
+            "I couldn't find anything about this in the IRDAI Protection of "
+            "Policyholders' Interests Regulations. This assistant only answers "
+            "questions about this specific regulation."
+        ),
+    },
 }
 
 VALID_LAW_CODES = tuple(LAWS.keys())

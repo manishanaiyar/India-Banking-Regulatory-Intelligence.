@@ -221,7 +221,6 @@ def _call_groq_json(chapter_label: str, chunk: str, retries: int = 3) -> dict:
             json={
                 "model": cfg.GROQ_MODEL,
                 "max_tokens": 3000,
-                "reasoning_effort": "low",
                 "response_format": {"type": "json_object"},
                 "messages": [
                     {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
