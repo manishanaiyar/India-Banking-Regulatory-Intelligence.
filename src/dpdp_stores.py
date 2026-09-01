@@ -95,7 +95,8 @@ class KnowledgeStore:
 
     def search(self, query: str, top_k: int, score_threshold: float = 0.0) -> list[tuple[str, float]]:
         with self._lock:
-            results = self.tfidf.search(query, top_k)
+            texts = {sid: s["raw_text"] for sid, s in self._committed.items()}
+            results = self.tfidf.search_reranked(query, texts, top_k)
         return [(doc_id, score) for doc_id, score in results if score >= score_threshold]
 
     def get_section_meta(self, section_id: str) -> Optional[dict]:
@@ -111,6 +112,28 @@ class KnowledgeStore:
         """
         with self.neo4j.session() as session:
             return session.run(cypher, sid=section_id).data()
+
+    def graph_context_batch(self, section_ids: list[str]) -> dict[str, list[dict]]:
+        """Same data as calling graph_context() once per ID, but in ONE
+        Neo4j round trip via UNWIND instead of len(section_ids) separate
+        sessions. This is what _retrieve() in main.py now calls for every
+        /ask request - the old per-section-loop version added up to
+        retrieval_top_k sequential network round trips (each opening its
+        own session) to every single query's latency, which on Neo4j
+        AuraDB's free tier is a genuinely measurable chunk of response
+        time before the LLM call even starts."""
+        if self.neo4j is None or not section_ids:
+            return {sid: [] for sid in section_ids}
+        cypher = """
+        UNWIND $sids AS sid
+        MATCH (s:Section {id: sid})-[:MENTIONS]->(related)
+        RETURN sid, labels(related)[0] AS type, related.name AS name
+        """
+        result: dict[str, list[dict]] = {sid: [] for sid in section_ids}
+        with self.neo4j.session() as session:
+            for row in session.run(cypher, sids=section_ids).data():
+                result[row["sid"]].append({"type": row["type"], "name": row["name"]})
+        return result
 
     def indexed_count(self) -> int:
         with self._lock:

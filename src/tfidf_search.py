@@ -102,3 +102,66 @@ class TFIDFIndex:
 
         scores.sort(key=lambda pair: pair[1], reverse=True)
         return scores[:top_k]
+
+    def search_reranked(
+        self, query: str, texts: dict[str, str], top_k: int,
+        candidate_pool: int = 15, mmr_lambda: float = 0.7, phrase_bonus: float = 0.15,
+    ) -> list[tuple[str, float]]:
+        """Two-stage retrieval: (1) TF-IDF cosine similarity picks a wider
+        candidate pool, (2) a cheap reranking pass reorders that pool
+        before truncating to top_k:
+
+          - Exact-phrase bonus: a section containing the literal query
+            string (case-insensitive) gets a flat score bump - cosine
+            similarity alone can rank a section that scatters the same
+            words across unrelated sentences above one that states the
+            exact phrase the user asked about.
+          - MMR (Maximal Marginal Relevance) diversity selection: greedily
+            picks each next result to maximize
+            `mmr_lambda * relevance - (1 - mmr_lambda) * max_similarity_to_already_picked`,
+            so a small top_k doesn't fill up with several near-duplicate
+            sections that all happen to share the same top terms, at the
+            expense of a genuinely different but still relevant section.
+
+        `texts` must map doc_id -> raw text (for the phrase-bonus check
+        and for computing pairwise similarity during MMR - both need the
+        already-fitted doc vectors, which _vectorize() recomputes cheaply
+        at this corpus size rather than caching a second copy).
+        """
+        candidates = self.search(query, candidate_pool)
+        if not candidates:
+            return []
+
+        query_lower = query.strip().lower()
+        boosted: list[tuple[str, float]] = []
+        for doc_id, score in candidates:
+            bonus = phrase_bonus if query_lower and query_lower in texts.get(doc_id, "").lower() else 0.0
+            boosted.append((doc_id, score + bonus))
+        boosted.sort(key=lambda pair: pair[1], reverse=True)
+
+        if len(boosted) <= top_k:
+            return boosted
+
+        doc_vec_by_id = {
+            doc_id: self._doc_vectors[self._doc_ids.index(doc_id)]
+            for doc_id, _ in boosted
+        }
+
+        def cosine(a: dict[str, float], b: dict[str, float]) -> float:
+            shared = a.keys() & b.keys()
+            return sum(a[t] * b[t] for t in shared)
+
+        remaining = list(boosted)
+        selected: list[tuple[str, float]] = []
+        while remaining and len(selected) < top_k:
+            best_idx, best_mmr = 0, float("-inf")
+            for i, (doc_id, relevance) in enumerate(remaining):
+                if selected:
+                    max_sim = max(cosine(doc_vec_by_id[doc_id], doc_vec_by_id[s_id]) for s_id, _ in selected)
+                else:
+                    max_sim = 0.0
+                mmr_score = mmr_lambda * relevance - (1 - mmr_lambda) * max_sim
+                if mmr_score > best_mmr:
+                    best_idx, best_mmr = i, mmr_score
+            selected.append(remaining.pop(best_idx))
+        return selected
