@@ -15,9 +15,41 @@ instead of leaving it as a recommendation-only stub. Pass protect=True to
 evaluate() to get real transformed output back (see /protect in main.py).
 """
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from src.banking_config import DATA_CLASSIFICATION_RULES, POLICY_MAP
 from src import crypto_utils
+
+# Word-boundary matching, not a plain substring check - a naive `"name" in
+# text_lower` incorrectly matches inside unrelated words (e.g. "username",
+# "surname", "codename"). \b doesn't work perfectly for multi-word phrases
+# with punctuation, but for this keyword list (single words and simple
+# phrases) it correctly rejects mid-word matches while still matching the
+# phrase surrounded by spaces/punctuation/text boundaries.
+_KEYWORD_PATTERN_CACHE: dict[str, "re.Pattern[str]"] = {}
+
+
+def _keyword_pattern(keyword: str) -> "re.Pattern[str]":
+    if keyword not in _KEYWORD_PATTERN_CACHE:
+        _KEYWORD_PATTERN_CACHE[keyword] = re.compile(r"\b" + re.escape(keyword) + r"\b")
+    return _KEYWORD_PATTERN_CACHE[keyword]
+
+
+# Maps a crypto_utils regex pattern name to the data class it should count
+# as evidence for, so classify_text() never disagrees with what
+# crypto_utils.mask_text() actually finds and masks in the same text. This
+# is what closes the gap where a real card number ("...ending in 4111 2222
+# 3333 4444") got silently masked by crypto_utils but wasn't reported under
+# transaction_data because the text said "corporate card", not the literal
+# keyword phrase "card number".
+_PATTERN_TO_CLASS = {
+    "card": "transaction_data",
+    "aadhaar": "customer_pii",
+    "pan": "customer_pii",
+    "email": "customer_pii",
+    "phone": "customer_pii",
+    "phone_intl": "customer_pii",
+}
 
 
 @dataclass
@@ -32,15 +64,36 @@ class PolicyResult:
 def classify_text(text: str) -> tuple[list[str], dict[str, list[str]]]:
     """Returns (matched_classes, matched_keywords). A text can match more
     than one class - e.g. a KYC form mentioning both Aadhaar (customer_pii)
-    and account balance (financial_data)."""
+    and account balance (financial_data).
+
+    Two detection passes, merged:
+      1. Keyword list (DATA_CLASSIFICATION_RULES), word-boundary matched.
+      2. crypto_utils' own regex patterns (card/aadhaar/pan/email/phone) -
+         this is what catches an actual card/Aadhaar/etc. NUMBER even when
+         the surrounding text doesn't use the exact keyword phrase, and
+         guarantees classification never misses something the masking
+         step downstream would have caught anyway."""
     text_lower = text.lower()
     matched_classes: list[str] = []
     matched_keywords: dict[str, list[str]] = {}
+
     for data_class, keywords in DATA_CLASSIFICATION_RULES.items():
-        hits = [kw for kw in keywords if kw in text_lower]
+        hits = [kw for kw in keywords if _keyword_pattern(kw).search(text_lower)]
         if hits:
             matched_classes.append(data_class)
             matched_keywords[data_class] = hits
+
+    for pattern_name, matches in crypto_utils.detect_patterns(text).items():
+        data_class = _PATTERN_TO_CLASS.get(pattern_name)
+        if data_class is None:
+            continue
+        if data_class not in matched_classes:
+            matched_classes.append(data_class)
+            matched_keywords[data_class] = []
+        label = f"[detected {pattern_name} pattern]"
+        if label not in matched_keywords[data_class]:
+            matched_keywords[data_class].append(label)
+
     return matched_classes, matched_keywords
 
 

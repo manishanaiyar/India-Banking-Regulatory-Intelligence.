@@ -68,10 +68,21 @@ _PATTERNS = {
         re.compile(r"\b(\+?91[-\s]?)?([6-9]\d{4})\d{5}\b"),
         lambda m: f"{m.group(1) or ''}{m.group(2)}XXXXX",
     ),
+    # Explicit international format (+<country code>-<groups>) other than
+    # +91 - deliberately requires the leading "+" to keep this
+    # conservative: without it, a generic digit-group pattern would risk
+    # false-positive matches on unrelated numeric IDs (employee IDs,
+    # ticket numbers, port numbers, etc.) that happen to be grouped with
+    # dashes. This only catches a number that's unambiguously written as
+    # a phone number in the first place.
+    "phone_intl": (
+        re.compile(r"(\+\d{1,3})[-\s]?\d{2,4}[-\s]?\d{3}[-\s]?\d{4}\b"),
+        lambda m: f"{m.group(1)}-XXX-XXXX",
+    ),
 }
 
 # Applied in this exact order (card before aadhaar - see comment above).
-_PATTERN_ORDER = ["card", "aadhaar", "pan", "email", "phone"]
+_PATTERN_ORDER = ["card", "aadhaar", "pan", "email", "phone", "phone_intl"]
 
 
 def mask_text(text: str) -> str:
@@ -81,6 +92,30 @@ def mask_text(text: str) -> str:
         pattern, repl = _PATTERNS[name]
         masked = pattern.sub(repl, masked)
     return masked
+
+
+def detect_patterns(text: str) -> dict[str, list[str]]:
+    """Same sequential, ORDER-DEPENDENT elimination mask_text() uses,
+    but reporting which pattern fired instead of transforming the text.
+    Each pattern's matched spans are blanked out before the next pattern
+    runs, so a span already claimed by an earlier pattern (e.g. a 16-digit
+    card number) can't ALSO be reported under a later pattern whose shape
+    happens to match a substring of it (e.g. aadhaar's generic
+    12-digit-grouped regex matching the first or last 12 digits of that
+    same card number). Without this, classify_text() and mask_text() could
+    disagree about what kind of PII a given span of digits actually is."""
+    found: dict[str, list[str]] = {}
+    working = text
+    for name in _PATTERN_ORDER:
+        pattern, _repl = _PATTERNS[name]
+        matches = [m.group(0) for m in pattern.finditer(working)]
+        if matches:
+            found[name] = matches
+        # Blank out matched spans (same length, so later patterns' \b
+        # word-boundary checks against surrounding text still behave
+        # correctly) before the next pattern searches.
+        working = pattern.sub(lambda m: "\x00" * len(m.group(0)), working)
+    return found
 
 
 # ---------------------------------------------------------------------------
