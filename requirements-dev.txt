@@ -1,0 +1,5 @@
+# Dev-only dependencies - NOT installed on Render (requirements.txt is the
+# production dependency list; keep pytest out of that to avoid bloating
+# the deploy). Install locally with: pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8.0.0

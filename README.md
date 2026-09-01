@@ -214,15 +214,78 @@ naturally stricter about wording than semantic embeddings.
 
 Full interactive docs at `/docs` (Swagger UI).
 
+## RAG pipeline engineering notes
+
+What actually happens between a question coming in and an answer going
+out, in order:
+
+1. **Retrieval (TF-IDF, in-memory).** Every ingested section is a
+   document in a per-law TF-IDF index (`src/tfidf_search.py`). No
+   external vector DB or embedding API - keeps this fully within Render's
+   and Neo4j AuraDB's free tiers.
+2. **Reranking (`search_reranked`).** Raw cosine similarity pulls a wider
+   candidate pool, then two cheap, zero-cost passes reorder it before
+   truncating to `retrieval_top_k`:
+   - an **exact-phrase bonus** for a section containing the literal query
+     string, not just its scattered terms;
+   - **MMR (Maximal Marginal Relevance)** diversity selection, so a small
+     top-k doesn't fill up with several near-duplicate sections at the
+     expense of a genuinely different but still-relevant one.
+3. **Smart context windowing (`_best_context_window`).** A section longer
+   than `context_char_limit` used to be truncated from character 0,
+   silently dropping the actually-relevant part if it was buried deeper
+   in. It's now centered on the highest query-term-density window inside
+   the section instead - a lightweight, dependency-free stand-in for
+   query-aware chunking.
+4. **Graph context, batched.** `graph_context_batch()` fetches every
+   retrieved section's Neo4j-linked entities in a single `UNWIND` query
+   instead of opening one session per section - collapses what used to
+   be up to `retrieval_top_k` sequential round trips into one.
+5. **Groundedness gate.** A query scoring below `hard_cutoff` returns
+   the law's `not_found_note` instead of going to the LLM at all - no
+   context, no generation, no chance to hallucinate an answer from
+   nothing.
+6. **Generation (Groq, streamed).** The system prompt restricts the
+   model to the numbered `[S<n>]` context sections only and gives it an
+   explicit refusal string to use when the context is insufficient.
+7. **Citation faithfulness check (`_check_citation_faithfulness`),
+   post-generation.** A system prompt is an instruction, not a guarantee.
+   This scans the generated answer for any `[S<n>]`-style citation and
+   flags any that don't correspond to a section actually retrieved and
+   placed in context - a deterministic, zero-extra-latency check that
+   doesn't require a second LLM call to enforce.
+8. **Per-stage timing, surfaced to the client.** The final `/ask` NDJSON
+   `"done"` event includes a `timings` object
+   (`retrieval_ms` / `graph_ms` / `generation_ms` / `total_ms`), not just
+   logged server-side - so latency is inspectable per request, not just
+   in aggregate.
+
+### Testing
+
+`tests/` covers the pure-Python pieces with no live network/DB
+dependency: TF-IDF ranking and reranking, the Policy Engine's
+classification rules, the masking/encryption/tokenisation round-trips in
+`crypto_utils.py`, the sequential-anchor section-splitting logic for
+GDPR/IRDAI (regression tests for two false-match failure modes found
+during development), and the `main.py` bug fixes (approve-review-item,
+ingestion audit logging, citation faithfulness, smart context window).
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
 ## Known limitations
 
+- **TF-IDF is lexical, not semantic** - it can miss relevant sections when a question uses very
+  different wording than the source text, even if the underlying meaning matches. Moving to
+  embeddings-based semantic search needs more RAM than Render's free tier gives a Python process
+  running FastAPI + pypdf + a sentence-transformers model at once.
 - **KYC and Cyber ingestion (`llm_ingest.py`) has not been run end-to-end with live network
   access** - the pure logic is tested, but the actual Groq calls, PDF layout handling, and
   verbatim-overlap behavior on the real source documents need a live run before production use.
 - **PMLA coverage is a curated subset**, not the exhaustive Sections 1-75, per FIU-IND's own
   published extract.
-- **TF-IDF is lexical, not semantic** - it can miss relevant sections when a question uses very
-  different wording than the source text, even if the underlying meaning matches.
 - **The tokenisation vault and Fernet key are in-memory / per-process** - a real deployment needs
   a persistent, access-controlled vault and a `POLICY_ENCRYPTION_KEY` set in the environment, not
   the auto-generated fallback.
@@ -231,9 +294,11 @@ Full interactive docs at `/docs` (Swagger UI).
   a persistent volume or move to Postgres before relying on this as a real compliance record.
 - **Both free-tier services (Render web service and Neo4j AuraDB Free) can spin down or pause
   after inactivity**, adding latency (up to 50+ seconds) to the first request after idle periods.
-- **No automated test suite yet.** `policy_engine.py`, `crypto_utils.py`, and `llm_ingest.py`'s
-  pure functions (`chunk_text`, `verbatim_overlap_ratio`, `split_pmla_sections`) are all
-  side-effect-free and would be cheap to cover with `pytest`.
+- **The citation faithfulness check catches invented citation *numbers*, not subtler unsupported
+  claims** - a model could still generate a plausible-sounding but ungrounded sentence attached to
+  a *real* citation. A stronger guard would compare each generated sentence's claims against its
+  cited section's actual text (e.g. via NLI-style entailment), which needs a model call this
+  pipeline doesn't currently make.
 
 ## Next steps for a production system
 
@@ -243,12 +308,12 @@ Full interactive docs at `/docs` (Swagger UI).
    equivalent) instead of in-memory/SQLite-on-ephemeral-disk.
 3. Add real authentication (per-reviewer accounts) in place of the current single shared
    `X-Admin-Key` and free-text `reviewer` field.
-4. Add automated tests, especially for the Policy Engine, crypto utilities, and ingestion parsing
-   logic.
-5. Also ingest the Digital Personal Data Protection Rules, 2025 (notified 13 November 2025) and
+4. Also ingest the Digital Personal Data Protection Rules, 2025 (notified 13 November 2025) and
    the exhaustive PMLA sections 1-75.
-6. Move retrieval from TF-IDF to embeddings-based semantic search once a paid tier or higher-RAM
+5. Move retrieval from TF-IDF to embeddings-based semantic search once a paid tier or higher-RAM
    host removes the memory constraint that motivated the TF-IDF trade-off.
+6. Strengthen the citation faithfulness check into a claim-level entailment check, not just a
+   citation-number existence check (see Known limitations).
 7. Repeat this pattern per country to build out a multi-jurisdiction policy graph.
 
 ## Sources

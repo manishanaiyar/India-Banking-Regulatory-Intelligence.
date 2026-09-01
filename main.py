@@ -66,6 +66,8 @@ only the JSON/NDJSON API, no static files.
 
 import json
 import logging
+import re
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -78,6 +80,7 @@ from src import dpdp_config as cfg
 from src.dpdp_ingest import build_tagged_sections, fetch_act_pdf
 from src.dpdp_stores import AnswerCache, KnowledgeStore, RateLimiter, ReviewQueue
 from src.groq_client import GroqError, stream_chat
+from src import tfidf_search
 
 from src import banking_config
 from src import policy_engine
@@ -488,6 +491,23 @@ def evaluate(request: ClassifyRequest):
     }
 
 
+@app.post("/protect")
+def protect(request: ClassifyRequest):
+    """Runs classify -> policy -> actually APPLIES the recommended controls
+    (crypto_utils.apply_controls()) and returns the real before/after output
+    - masked text, a Fernet-encrypted token, and a vault-backed surrogate
+    token - not just a list of control *names* the way /evaluate does.
+    Was built (crypto_utils.py) but never wired to any endpoint until now."""
+    result = policy_engine.evaluate(request.text, protect=True)
+    return {
+        "data_classes": result.data_classes,
+        "required_controls": result.required_controls,
+        "rationale": result.rationale,
+        "matched_keywords": result.matched_keywords,
+        "protected": result.protected,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Audit & Monitoring export.
 # ---------------------------------------------------------------------------
@@ -521,10 +541,57 @@ def _ndjson(obj: dict) -> str:
     return json.dumps(obj) + "\n"
 
 
-def _retrieve(query: str, law: str) -> tuple[str, list[str], list[dict], float]:
+def _best_context_window(text: str, query_terms: set[str], char_limit: int) -> str:
+    """Smart chunking at query time: instead of always taking text[:char_limit]
+    (which silently truncates away the actually-relevant part of any
+    section longer than char_limit), slide a char_limit-wide window over
+    the text and keep the one with the highest density of query-term hits.
+    Falls back to the simple prefix when the text already fits or no
+    query terms appear anywhere (cheap correctness-preserving default -
+    this only changes behavior when it can genuinely do better)."""
+    if len(text) <= char_limit or not query_terms:
+        return text[:char_limit]
+
+    text_lower = text.lower()
+    term_positions: list[int] = []
+    for term in query_terms:
+        start = 0
+        while True:
+            idx = text_lower.find(term, start)
+            if idx == -1:
+                break
+            term_positions.append(idx)
+            start = idx + len(term)
+    if not term_positions:
+        return text[:char_limit]
+
+    # Coarse scan in fixed-size steps (not every possible offset - this
+    # is a legal-section-length text, a few hundred candidate windows is
+    # already far more granularity than the char_limit needs).
+    step = max(char_limit // 8, 40)
+    best_start, best_hits = 0, -1
+    for start in range(0, max(len(text) - char_limit, 0) + 1, step):
+        end = start + char_limit
+        hits = sum(1 for pos in term_positions if start <= pos < end)
+        if hits > best_hits:
+            best_start, best_hits = start, hits
+    window = text[best_start:best_start + char_limit]
+    return ("…" if best_start > 0 else "") + window
+
+
+def _retrieve(query: str, law: str) -> tuple[str, list[str], list[dict], float, dict[str, float]]:
     law_cfg = banking_config.LAWS[law]
     store_ = _get_store(law)
+    query_terms = {t for t in tfidf_search.tokenize(query)}
+
+    t0 = time.perf_counter()
     results = store_.search(query, law_cfg["retrieval_top_k"], score_threshold=law_cfg["hard_cutoff"])
+    retrieval_ms = (time.perf_counter() - t0) * 1000
+
+    section_ids = [sid for sid, _ in results]
+    t1 = time.perf_counter()
+    graph_by_section = store_.graph_context_batch(section_ids)
+    graph_ms = (time.perf_counter() - t1) * 1000
 
     context_str = ""
     citations: list[str] = []
@@ -540,18 +607,40 @@ def _retrieve(query: str, law: str) -> tuple[str, list[str], list[dict], float]:
             "id": section_id, "title": meta["title"], "chapter": meta.get("chapter", ""),
             "score": round(score, 3),
         })
-        graph_rows = store_.graph_context(section_id)
+        windowed_text = _best_context_window(meta["raw_text"], query_terms, law_cfg["context_char_limit"])
+        graph_rows = graph_by_section.get(section_id, [])
         graph_info = "\n".join(f"  - {row['type']}: {row['name']}" for row in graph_rows)
-        context_str += f"\n[{section_id}] {meta['raw_text'][:law_cfg['context_char_limit']]}\n{graph_info}\n"
+        context_str += f"\n[{section_id}] {windowed_text}\n{graph_info}\n"
 
+    timings = {"retrieval_ms": round(retrieval_ms, 1), "graph_ms": round(graph_ms, 1)}
     logger.info(
-        "Retrieval for law=%s query=%r: %d results above HARD_CUTOFF=%.3f, top_score=%.3f",
-        law, query, len(results), law_cfg["hard_cutoff"], top_score,
+        "Retrieval for law=%s query=%r: %d results above HARD_CUTOFF=%.3f, top_score=%.3f, "
+        "retrieval_ms=%.1f graph_ms=%.1f",
+        law, query, len(results), law_cfg["hard_cutoff"], top_score, retrieval_ms, graph_ms,
     )
-    return context_str, citations, citation_meta, top_score
+    return context_str, citations, citation_meta, top_score, timings
+
+
+_CITATION_RE = re.compile(r"\[([A-Za-z0-9_:.\-]+)\]")
+
+
+def _check_citation_faithfulness(answer_text: str, valid_citations: list[str]) -> list[str]:
+    """Anti-hallucination guard: scans the generated answer for anything
+    that looks like a citation tag (the same "[S<n>]" / "[law:n]" bracket
+    style the system prompt asks the model to use) and returns any that
+    do NOT correspond to a section actually retrieved and placed in
+    context. The model is instructed to cite only from context, but a
+    system prompt is a request, not a guarantee - this is a cheap,
+    deterministic, post-hoc check that catches the model inventing a
+    citation number that was never in front of it. Doesn't require a
+    second LLM call, so it adds no latency or generation cost."""
+    valid = set(valid_citations)
+    mentioned = set(_CITATION_RE.findall(answer_text))
+    return sorted(mentioned - valid)
 
 
 def _stream_answer(query: str, law: str):
+    t_request_start = time.perf_counter()
     law_cfg = banking_config.LAWS[law]
 
     # Ingestion is no longer triggered inline here for the LLM-based laws -
@@ -588,6 +677,7 @@ def _stream_answer(query: str, law: str):
         yield _ndjson({
             "type": "done", "status": "answered",
             "citations": cached["citations"], "citation_meta": cached["citation_meta"], "cached": True,
+            "timings": {"total_ms": round((time.perf_counter() - t_request_start) * 1000, 1), "cache_hit": True},
         })
         audit_log.log_query(audit_log.QueryLogEntry(
             law_code=law, query_text=query, retrieved_section_ids=cached["citations"],
@@ -598,7 +688,7 @@ def _stream_answer(query: str, law: str):
 
     policy_result = policy_engine.evaluate(query)
 
-    context_str, citations, citation_meta, top_score = _retrieve(query, law)
+    context_str, citations, citation_meta, top_score, retrieve_timings = _retrieve(query, law)
 
     if not citations:
         store_ = _get_store(law)
@@ -609,6 +699,7 @@ def _stream_answer(query: str, law: str):
         yield _ndjson({
             "type": "done", "status": "no_answer", "note": note,
             "citations": [], "citation_meta": [],
+            "timings": {**retrieve_timings, "total_ms": round((time.perf_counter() - t_request_start) * 1000, 1)},
         })
         audit_log.log_query(audit_log.QueryLogEntry(
             law_code=law, query_text=query, retrieved_section_ids=[],
@@ -624,6 +715,7 @@ def _stream_answer(query: str, law: str):
             "note": f"High-risk question for {law_cfg['label']}. Held for human review instead "
                     f"of an auto-generated answer.",
             "citations": citations, "citation_meta": citation_meta,
+            "timings": {**retrieve_timings, "total_ms": round((time.perf_counter() - t_request_start) * 1000, 1)},
         })
         audit_log.log_query(audit_log.QueryLogEntry(
             law_code=law, query_text=query, retrieved_section_ids=citations,
@@ -636,6 +728,7 @@ def _stream_answer(query: str, law: str):
     user_prompt = f"Context from {law_cfg['label']}:\n{context_str}\n\nQuestion: {query}"
 
     full_answer = ""
+    t_gen_start = time.perf_counter()
     try:
         for piece in stream_chat([
             {"role": "system", "content": law_cfg["system_prompt"]},
@@ -652,6 +745,25 @@ def _stream_answer(query: str, law: str):
             data_classes=policy_result.data_classes, required_controls=policy_result.required_controls,
         ))
         return
+    generation_ms = round((time.perf_counter() - t_gen_start) * 1000, 1)
+
+    # Anti-hallucination guard: catch the model citing a section number
+    # that was never actually retrieved/placed in its context. The system
+    # prompt tells it to cite only from context, but that's an
+    # instruction, not an enforcement mechanism - this is the enforcement.
+    hallucinated = _check_citation_faithfulness(full_answer, citations)
+    if hallucinated:
+        logger.warning(
+            "Citation faithfulness check failed for law=%s query=%r: model cited %s, "
+            "which were not in the retrieved context %s",
+            law, query, hallucinated, citations,
+        )
+        disclaimer = (
+            f"\n\n(Note: this answer referenced {', '.join(hallucinated)}, which weren't in the "
+            f"retrieved context - treat that part with extra caution and verify independently.)"
+        )
+        full_answer += disclaimer
+        yield _ndjson({"type": "token", "text": disclaimer})
 
     if low_confidence:
         disclaimer = "\n\n(Low-confidence match - please verify against the cited section text.)"
@@ -661,10 +773,17 @@ def _stream_answer(query: str, law: str):
     answer_cache.set(cache_key, {
         "answer": full_answer, "citations": citations, "citation_meta": citation_meta,
     })
+    total_ms = round((time.perf_counter() - t_request_start) * 1000, 1)
     yield _ndjson({
         "type": "done", "status": "answered",
         "citations": citations, "citation_meta": citation_meta, "cached": False,
+        "timings": {**retrieve_timings, "generation_ms": generation_ms, "total_ms": total_ms},
+        "hallucinated_citations": hallucinated,
     })
+    logger.info(
+        "Answered law=%s query=%r in total_ms=%.1f (retrieval_ms=%.1f graph_ms=%.1f generation_ms=%.1f)",
+        law, query, total_ms, retrieve_timings["retrieval_ms"], retrieve_timings["graph_ms"], generation_ms,
+    )
     audit_log.log_query(audit_log.QueryLogEntry(
         law_code=law, query_text=query, retrieved_section_ids=citations,
         answer_text=full_answer, was_high_risk=False, required_human_review=False,
