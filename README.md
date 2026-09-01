@@ -1,49 +1,50 @@
 # India Banking Regulatory Intelligence - GraphRAG Assistant with Human-in-the-Loop Review
 
 A production deployment of a policy knowledge-graph and retrieval-augmented assistant covering
-**four Indian regulatory frameworks** across three compliance pillars - Privacy, RBI/KYC, and
-Cybersecurity - each with its own knowledge graph, retrieval index, and human-review queue.
-Deployed on free-tier cloud infrastructure. No local setup required to use it.
+**six regulatory frameworks** (India + EU) across four compliance pillars - Privacy, RBI/KYC,
+Cybersecurity, and Insurance - each with its own knowledge graph, retrieval index, and
+human-review queue. Deployed on free-tier cloud infrastructure. No local setup required to use it.
 
 **Live demo:** https://india-dpdp-act-graphrag-assistant-with-w6t0.onrender.com
 **API:** https://india-dpdp-act-graphrag-assistant-with.onrender.com/docs
 
 ## What this is
 
-This started as a single-law DPDP Act assistant and grew into a multi-law regulatory
-intelligence platform. It combines: a **knowledge graph per law** connecting sections to their
-obligations, rights, and penalties; a **lightweight lexical search index** for retrieval over
-each law's text; a **hosted LLM** that retrieves and generates cited answers; a **Data
-Classification + Policy Engine** that tags both ingested regulatory text and live queries against
-a customer-data taxonomy and recommends (and can actually apply) masking/encryption/tokenisation;
-a **human-in-the-loop review gate** so nothing unverified reaches an end user; and an **append-only
+This started as a single-law DPDP Act assistant and grew into a multi-law, multi-jurisdiction
+regulatory intelligence platform. It combines: a **knowledge graph per law** connecting sections
+to their obligations, rights, and penalties; a **lexical retrieval + reranking pipeline** (TF-IDF
+with MMR diversity and exact-phrase reranking - see *RAG pipeline engineering notes* below) over
+each law's text; a **hosted LLM** that retrieves and generates cited answers, with a post-generation
+citation-faithfulness check as an anti-hallucination guard; a **Data Classification + Policy
+Engine** that tags both ingested regulatory text and live queries against a customer-data
+taxonomy and recommends (and can actually apply) masking/encryption/tokenisation; a
+**human-in-the-loop review gate** so nothing unverified reaches an end user; and an **append-only
 audit trail** covering queries, review decisions, and ingestion-time classifications. Packaged as
-a FastAPI backend and a static HTML/JS frontend, deployed independently.
+a FastAPI backend and a static HTML/JS frontend, deployed independently as two Render services.
 
 ## Architecture
 
 ```
-        RBI/KYC              Privacy              Cybersecurity
-     KYC/AML, PMLA,        DPDP Act, 2023      RBI Cyber Security
-     CDD, Beneficial        (Consent,           Framework + CERT-In
-     Owner                  Retention,          Incident Reporting
-                             Purpose)
-          |                     |                      |
-          +----------+----------+----------+-----------+
-                     |
-                     v
-            DATA CLASSIFICATION  (policy_engine.classify_text)
-     Customer PII | Financial Data | Transaction Data | Sensitive Data
-                     |
-                     v
-                POLICY ENGINE  (policy_engine.evaluate / crypto_utils.apply_controls)
-        Masking       Encryption       Tokenisation
-     (regex, partial  (Fernet,         (surrogate token
-      reveal)          reversible)      + reversible vault)
-                     |
-                     v
-             AUDIT & MONITORING  (audit_log.py - SQLite, append-only, DB-enforced)
-        query_log | review_decision_log | ingestion_policy_log
+   RBI / KYC          Privacy            Cybersecurity        Insurance
+ KYC/AML, PMLA,   DPDP Act, 2023      RBI Cyber Security    IRDAI Protection
+ CDD, Beneficial   GDPR (EU)           Framework + CERT-In   of Policyholders'
+ Owner             2016/679            Incident Reporting    Interests, 2017
+      |                |                     |                    |
+      +--------+-------+---------+-----------+--------------------+
+               |
+               v
+      DATA CLASSIFICATION  (policy_engine.classify_text)
+Customer PII | Financial Data | Transaction Data | Sensitive Data
+               |
+               v
+          POLICY ENGINE  (policy_engine.evaluate / crypto_utils.apply_controls)
+  Masking       Encryption       Tokenisation
+(regex, partial  (Fernet,         (surrogate token
+ reveal)          reversible)      + reversible vault)
+               |
+               v
+       AUDIT & MONITORING  (audit_log.py - SQLite, append-only, DB-enforced)
+  query_log | review_decision_log | ingestion_policy_log
 ```
 
 Per law, the ingestion pipeline is:
@@ -52,7 +53,7 @@ Per law, the ingestion pipeline is:
 Official source document (PDF or HTML, fetched live)
         |
         v
-Parse into numbered sections (regex for DPDP/PMLA, LLM-based extraction for KYC/Cyber)
+Parse into numbered sections (regex for DPDP/GDPR/IRDAI/PMLA, LLM-based extraction for KYC/Cyber)
         |
         v
 Rule-based/LLM tagging: category (Obligation/Right/Penalty/Definition) + confidence
@@ -76,14 +77,16 @@ Indexed for TF-IDF search                  Sits in a review queue until a human
 FastAPI backend (/ask, /pending-review, /health, /stats, /classify, /evaluate, /protect)
    |
    v
-On a question: TF-IDF cosine-similarity search retrieves the most relevant sections for the
-selected law, the query itself is classified by the Policy Engine, then Groq's hosted API
-generates a streamed, cited answer - UNLESS the question is high-risk for that law (penalty,
-obligation, breach, beneficial owner, CERT-In, etc.), in which case it's held for human review
-instead of answered directly
+On a question: TF-IDF search + MMR/phrase reranking retrieves the most relevant sections for
+the selected law (with a single batched Neo4j call for graph context, not one per section), the
+query itself is classified by the Policy Engine, then Groq's hosted API generates a streamed,
+cited answer - checked post-generation for any citation the model invented that wasn't actually
+retrieved - UNLESS the question is high-risk for that law (penalty, obligation, breach,
+beneficial owner, CERT-In, etc.), in which case it's held for human review instead of answered
+directly
    |
    v
-Static HTML/JS/CSS chat UI with a law selector - deployed as its own service, calling
+Static HTML/JS/CSS chat UI with a law selector - deployed as its own Render Static Site, calling
 the backend's public API URL directly
 ```
 
@@ -91,30 +94,33 @@ the backend's public API URL directly
 
 | Code | Law | Pillar | Extraction method |
 |---|---|---|---|
-| `dpdp` | Digital Personal Data Protection Act, 2023 | Privacy | Regex-based (fast, auto-ingests at startup) |
+| `dpdp` | Digital Personal Data Protection Act, 2023 | Privacy | Regex-based, sequential-anchor split (fast, auto-ingests at startup) |
+| `gdpr` | General Data Protection Regulation (EU) 2016/679 - full text, 99 Articles | Privacy | Regex-based, sequential-anchor split (fast, on-demand) |
 | `kyc_aml` | RBI Master Direction on KYC (incl. CDD, Beneficial Owner) | RBI/KYC | LLM-based (Groq, ~5-6 min, on-demand) |
 | `pmla` | Prevention of Money Laundering Act, 2002 + Rules | RBI/KYC | Header-split on clean HTML (fast, on-demand) |
 | `rbi_cyber` | RBI Cyber Security Framework + CERT-In Incident Reporting Rules | Cybersecurity | LLM-based (Groq, ~5-6 min, on-demand) |
+| `irdai` | IRDAI (Protection of Policyholders' Interests) Regulations, 2017 | Insurance | Header-split on clean HTML, sequential-anchor (fast, on-demand) |
 
-Only `dpdp` auto-ingests on startup. Trigger the other three with `POST /ingest/{law_code}`
+Only `dpdp` auto-ingests on startup. Trigger the other five with `POST /ingest/{law_code}`
 (admin key required) and poll `GET /laws` or `GET /health` for completion.
 
 ## Tech stack
 
 | Component | Tool | Role |
 |---|---|---|
-| Knowledge graph | Neo4j AuraDB (Free tier, hosted) | Sections linked to obligations, rights, penalties, definitions, plus data_classes/required_controls |
-| Retrieval | TF-IDF cosine similarity (pure Python) | Lexical search over section text - fits a 512MB RAM budget, one index per law |
+| Knowledge graph | Neo4j AuraDB (Free tier, hosted) | Sections linked to obligations, rights, penalties, definitions, plus data_classes/required_controls; graph context for all retrieved sections is fetched in one batched query, not one per section |
+| Retrieval | TF-IDF cosine similarity + MMR/exact-phrase reranking (pure Python) | Lexical search over section text, reranked for diversity and phrase precision - fits a 512MB RAM budget, one index per law |
 | LLM | Groq hosted API (Llama 3.3 70B by default) | Generates cited answers; also powers KYC/Cyber section extraction |
 | Data Classification | `policy_engine.py` (rule-based, keyword matching) | Tags text against customer_pii / financial_data / transaction_data / sensitive_data |
-| Policy enforcement | `crypto_utils.py` (regex masking, Fernet encryption, token vault) | Actually applies masking/encryption/tokenisation, not just recommends them |
+| Policy enforcement | `crypto_utils.py` (regex masking, Fernet encryption, token vault) | Actually applies masking/encryption/tokenisation, not just recommends them - exposed via `POST /protect` |
 | Audit trail | `audit_log.py` (SQLite, append-only, trigger-enforced) | Query log, review-decision log, ingestion-classification log |
-| Backend | FastAPI + Uvicorn, deployed on Render (Python, free tier) | REST + streaming NDJSON API |
-| Frontend | Static HTML/CSS/JS, deployed separately (Vercel/Render Static) | Chat UI with law selector + live human-review sidebar |
-| Source data | Official government PDFs/HTML (MeitY, RBI, FIU-IND, CERT-In) | Fetched live at ingestion time, not hardcoded |
+| Backend | FastAPI + Uvicorn, deployed on Render (Python, free tier) | REST + streaming NDJSON API, with per-request retrieval/generation timing in every `/ask` response |
+| Frontend | Static HTML/CSS/JS, deployed as a separate Render Static Site | Chat UI with law selector + live human-review sidebar + Data Classification panel |
+| Testing | `pytest` (`tests/`) | Unit + integration coverage for retrieval, policy engine, crypto utilities, ingestion parsing, and API bug-fix regressions |
+| Source data | Official government/EU texts (MeitY, RBI, FIU-IND, CERT-In, EUR-Lex mirror, IRDAI mirror) | Fetched live at ingestion time, not hardcoded |
 
-Backend and frontend are two independent deployments with different URLs; the frontend calls the
-backend's API URL directly (CORS via `ALLOWED_ORIGIN`).
+Backend and frontend are two independent Render deployments with different URLs; the frontend
+calls the backend's API URL directly (CORS via `ALLOWED_ORIGIN`).
 
 ## Deployment
 
@@ -144,7 +150,7 @@ backend's API URL directly (CORS via `ALLOWED_ORIGIN`).
 ## Human-in-the-loop: two checkpoints
 
 **Checkpoint 1 - before anything enters the graph/search index.** Every parsed section (for all
-four laws) is tagged by category and run through the Data Classification / Policy Engine. Any
+six laws) is tagged by category and run through the Data Classification / Policy Engine. Any
 section touching an Obligation/Penalty, with low parse confidence, failing an LLM verbatim check,
 or matching the `sensitive_data` classification, is held out of the graph and search index until
 a human approves it through the review sidebar (`POST /approve-review-item`, admin key required).
@@ -284,6 +290,10 @@ pytest tests/ -v
 - **KYC and Cyber ingestion (`llm_ingest.py`) has not been run end-to-end with live network
   access** - the pure logic is tested, but the actual Groq calls, PDF layout handling, and
   verbatim-overlap behavior on the real source documents need a live run before production use.
+- **GDPR and IRDAI are the newest additions and have less production mileage than DPDP** - the
+  section-splitting logic is unit-tested (see `tests/test_ingest_splitting.py`) against realistic
+  synthetic text, but hasn't yet had a long-running ingestion against the live source documents
+  monitored for edge cases the tests didn't anticipate.
 - **PMLA coverage is a curated subset**, not the exhaustive Sections 1-75, per FIU-IND's own
   published extract.
 - **The tokenisation vault and Fernet key are in-memory / per-process** - a real deployment needs
@@ -320,10 +330,18 @@ pytest tests/ -v
 
 - DPDP Act, 2023 - Ministry of Electronics and Information Technology (MeitY):
   https://www.meity.gov.in/static/uploads/2024/06/2bf1f0e9f04e6fb4f8fef35e82c42aa5.pdf
-- RBI Master Direction on KYC - verify the current URL at rbi.org.in before ingesting; RBI
-  reissues master directions with new document IDs periodically.
+- General Data Protection Regulation (EU) 2016/679 - full official text, mirrored at
+  https://gdpr.eu.org/full/full.pdf (EUR-Lex's own PDF endpoint returns an empty body for
+  automated requests - see `src/gdpr_ingest.py` for the sourcing note).
+- RBI Master Direction on KYC - fetched from rbidocs.rbi.org.in; verify the current URL at
+  rbi.org.in before ingesting, as RBI reissues master directions with new document IDs
+  periodically.
 - PMLA, 2002 + Rules - Financial Intelligence Unit - India (FIU-IND): https://fiuindia.gov.in
 - RBI Cyber Security Framework + CERT-In Directions - CERT-In: https://www.cert-in.org.in
+- IRDAI (Protection of Policyholders' Interests) Regulations, 2017 - mirrored at
+  taxguru.in (irdai.gov.in's own document pages block automated fetches - see
+  `src/irdai_ingest.py` for the sourcing note and a caution about re-verifying this URL
+  periodically).
 
 
 
