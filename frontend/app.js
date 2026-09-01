@@ -135,6 +135,8 @@ const el = {
   resultRationale: document.getElementById("resultRationale"),
   resultKeywordsBlock: document.getElementById("resultKeywordsBlock"),
   resultKeywords: document.getElementById("resultKeywords"),
+  resultProtectedBlock: document.getElementById("resultProtectedBlock"),
+  resultProtected: document.getElementById("resultProtected"),
   auditLawFilter: document.getElementById("auditLawFilter"),
   auditList: document.getElementById("auditList"),
 };
@@ -591,7 +593,9 @@ el.classifyForm.addEventListener("submit", async (e) => {
   el.classifyBtn.disabled = true;
   el.classifyBtn.textContent = "Evaluating…";
   try {
-    const res = await fetch(`${API}/evaluate`, {
+    // /protect (not /evaluate) so the response also includes real
+    // masked/encrypted/tokenised output, not just control names.
+    const res = await fetch(`${API}/protect`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
@@ -637,16 +641,51 @@ function renderClassifyResult(data) {
     el.resultControls.appendChild(chip);
   }
 
-  el.resultRationale.textContent = data.rationale || "—";
+  // FIX: rationale is {data_class: rationale_string}, not a plain string -
+  // join each class's rationale onto its own line instead of dumping the
+  // raw object (which used to render as literal "[object Object]").
+  const rationaleEntries = Object.entries(data.rationale || {});
+  el.resultRationale.innerHTML = "";
+  if (!rationaleEntries.length) {
+    el.resultRationale.innerHTML = `<span class="empty-inline">—</span>`;
+  }
+  for (const [dataClass, text] of rationaleEntries) {
+    const line = document.createElement("div");
+    line.className = "rationale-line";
+    line.innerHTML = `<strong>${dataClass}:</strong> ${text}`;
+    el.resultRationale.appendChild(line);
+  }
 
-  const keywords = data.matched_keywords || [];
-  el.resultKeywordsBlock.hidden = keywords.length === 0;
+  // FIX: matched_keywords is {data_class: [keyword, ...]}, not a flat
+  // array - "for (const k of keywords)" on that object shape used to
+  // throw "TypeError: keywords is not iterable" on every single call
+  // (verified directly), which is what actually produced the misleading
+  // "Connection failed" alert regardless of whether text matched anything.
+  const keywordGroups = Object.entries(data.matched_keywords || {});
+  const allKeywords = keywordGroups.flatMap(([, kws]) => kws);
+  el.resultKeywordsBlock.hidden = allKeywords.length === 0;
   el.resultKeywords.innerHTML = "";
-  for (const k of keywords) {
+  for (const k of allKeywords) {
     const chip = document.createElement("span");
     chip.className = "chip chip-muted";
     chip.textContent = k;
     el.resultKeywords.appendChild(chip);
+  }
+
+  // New: real protected output from /protect (masked / encrypted /
+  // tokenised) - crypto_utils.py always had this working, it just was
+  // never surfaced anywhere in the API or UI until now.
+  const protectedEntries = Object.entries(data.protected || {});
+  el.resultProtectedBlock.hidden = protectedEntries.length === 0;
+  el.resultProtected.innerHTML = "";
+  const CONTROL_LABELS = { masked: "Masking", encrypted: "Encryption (Fernet)", tokenised: "Tokenisation" };
+  for (const [kind, value] of protectedEntries) {
+    const row = document.createElement("div");
+    row.className = "protected-row";
+    row.innerHTML = `<div class="protected-row-label">${CONTROL_LABELS[kind] || kind}</div>
+      <code class="protected-row-value"></code>`;
+    row.querySelector(".protected-row-value").textContent = value;
+    el.resultProtected.appendChild(row);
   }
 }
 
